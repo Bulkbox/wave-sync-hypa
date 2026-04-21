@@ -28,9 +28,22 @@ HANDLER_REGISTRY: dict[str, Callable[[dict, str], None] | None] = {
 	"payment_apply": None,
 }
 
+_handlers_loaded = False
+
+
+def _ensure_handlers_loaded() -> None:
+	"""Import the handlers package once so each submodule can register into HANDLER_REGISTRY."""
+	global _handlers_loaded
+	if _handlers_loaded:
+		return
+	import wave_sync_hypa.wave_sync_hypa.handlers  # noqa: F401
+
+	_handlers_loaded = True
+
 
 def resolve_handler(doc_type: str, action: str) -> Callable[[dict, str], None] | None:
 	"""Return the handler callable for (doc_type, action) or None if no enabled rule matches."""
+	_ensure_handlers_loaded()
 	handler_key = _lookup_handler_key(doc_type, action)
 	if handler_key is None:
 		return None

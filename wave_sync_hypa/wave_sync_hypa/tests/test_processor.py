@@ -16,6 +16,7 @@ class TestProcessWebhook(FrappeTestCase):
 		self.wave_id = frappe.generate_hash(length=12)
 		self.updated_at = "1776753292987"
 		self._clear_rules()
+		dispatcher._ensure_handlers_loaded()
 		self._original_handler = dispatcher.HANDLER_REGISTRY.get("customer_upsert")
 		self._handler_calls: list[tuple] = []
 		dispatcher.HANDLER_REGISTRY["customer_upsert"] = self._record_handler

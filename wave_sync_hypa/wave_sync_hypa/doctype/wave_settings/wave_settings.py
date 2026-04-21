@@ -25,10 +25,22 @@ class WaveSettings(Document):
 			frappe.throw(_("{0} must be greater than zero.").format(_(self.meta.get_label(fieldname))))
 
 	def _validate_enabled_requires_keys(self) -> None:
-		"""When the integration is enabled, the inbound API key must be set."""
+		"""When the integration is enabled, the inbound API key must be set.
+
+		Password fields show a mask string to the UI when untouched. This method
+		treats the in-memory value as authoritative: if it is empty the user is
+		explicitly clearing the key, and the integration must not remain enabled;
+		if it is the mask (all asterisks) the user left the existing value alone
+		and we consult the stored password to confirm something is on file.
+		"""
 		if not self.enabled:
 			return
-		if not self.get_password("inbound_api_key", raise_exception=False):
-			frappe.throw(
-				_("Inbound API Key is required when the integration is enabled.")
-			)
+		current = self.inbound_api_key or ""
+		if current and all(c == "*" for c in current):
+			# Masked value means the stored secret is unchanged; confirm one exists.
+			if self.get_password("inbound_api_key", raise_exception=False):
+				return
+		elif current:
+			# User provided a real new key inline; save will persist it.
+			return
+		frappe.throw(_("Inbound API Key is required when the integration is enabled."))
