@@ -25,11 +25,12 @@
   },
   {
    "columns": 2,
-   "description": "Exact status string sent to Wave (e.g. ACCEPTED, UNDER_PICKING, COMPLETED).",
+   "description": "Status string sent to Wave's changeorderstatus endpoint. Chosen from the Wave Status catalogue.",
    "fieldname": "wave_status",
-   "fieldtype": "Data",
+   "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Wave Status",
+   "options": "Wave Status",
    "reqd": 1
   },
   {

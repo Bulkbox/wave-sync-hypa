@@ -15,11 +15,12 @@
  "fields": [
   {
    "columns": 2,
-   "description": "Wave order status, e.g. PENDING, ACCEPTED, CANCELLED, UNDER_PICKING.",
+   "description": "Wave order status, chosen from the Wave Status catalogue. Add or disable statuses under Wave Status.",
    "fieldname": "wave_status",
-   "fieldtype": "Data",
+   "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Wave Status",
+   "options": "Wave Status",
    "reqd": 1
   },
   {
