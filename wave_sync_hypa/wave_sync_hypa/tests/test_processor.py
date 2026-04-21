@@ -78,8 +78,9 @@ class TestProcessWebhook(FrappeTestCase):
 
 	def test_skipped_when_handler_not_registered(self):
 		"""Rule points at a key whose callable is None (phase not landed) -> log Skipped."""
-		self._enable_rule("ORDER", "CREATE", "order_create")  # order_create is still None
-		process_webhook(self.correlation_id, "ORDER", "CREATE", self._payload())
+		# payment_apply lands in Phase 8; the Action value must exist in the catalogue.
+		self._enable_rule("ORDER", "DELETE", "payment_apply")
+		process_webhook(self.correlation_id, "ORDER", "DELETE", self._payload())
 		self.assertEqual(self._last_step(), "Skipped")
 
 	def test_completed_on_handler_success(self):

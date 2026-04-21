@@ -93,6 +93,7 @@ class TestResolveHandler(FrappeTestCase):
 
 	def test_returns_none_when_key_not_registered(self):
 		"""A rule pointing at a key whose callable is still None returns None (phase not landed yet)."""
-		# order_create is seeded as None in the registry; simulate a rule pointing at it.
-		self._add_rule("ORDER", "CREATE", "order_create", enabled=1)
-		self.assertIsNone(dispatcher.resolve_handler("ORDER", "CREATE"))
+		# payment_apply stays unregistered until Phase 8; simulate a rule pointing at it.
+		# The action must exist in the Wave Action catalogue because the field is now a Link.
+		self._add_rule("ORDER", "DELETE", "payment_apply", enabled=1)
+		self.assertIsNone(dispatcher.resolve_handler("ORDER", "DELETE"))
