@@ -148,23 +148,22 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"wave_sync_hypa.tasks.all"
-# 	],
-# 	"daily": [
-# 		"wave_sync_hypa.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"wave_sync_hypa.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"wave_sync_hypa.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"wave_sync_hypa.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"daily": [
+		"wave_sync_hypa.wave_sync_hypa.tasks.log_retention.purge_old_logs",
+	],
+}
+
+# Fixtures
+# --------
+# Ship our custom fields with the app so `bench migrate` on a fresh site adds them.
+
+fixtures = [
+	{
+		"doctype": "Custom Field",
+		"filters": [["name", "like", "%-wave_%"]],
+	}
+]
 
 # Testing
 # -------
