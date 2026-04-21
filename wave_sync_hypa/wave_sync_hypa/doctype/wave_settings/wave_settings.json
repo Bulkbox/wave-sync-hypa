@@ -1,0 +1,219 @@
+{
+ "actions": [],
+ "creation": "2026-04-21 00:00:00",
+ "description": "Single config DocType for the Wave <> Hypa integration. All rules live here so admins can edit them without a deploy.",
+ "doctype": "DocType",
+ "document_type": "Other",
+ "engine": "InnoDB",
+ "field_order": [
+  "integration_section",
+  "enabled",
+  "column_break_integration",
+  "price_scale_divisor",
+  "log_retention_days",
+  "inbound_auth_section",
+  "inbound_api_key",
+  "outbound_section",
+  "wave_api_base_url",
+  "column_break_outbound",
+  "wave_api_key",
+  "erp_defaults_section",
+  "default_company",
+  "default_warehouse",
+  "default_price_list",
+  "default_currency",
+  "column_break_erp_defaults",
+  "default_customer_group",
+  "default_territory",
+  "walk_in_customer",
+  "rules_section",
+  "route_rules",
+  "inbound_status_rules",
+  "outbound_status_rules",
+  "fee_mappings"
+ ],
+ "fields": [
+  {
+   "fieldname": "integration_section",
+   "fieldtype": "Section Break",
+   "label": "Integration"
+  },
+  {
+   "default": "1",
+   "description": "Master kill-switch. When off, the webhook endpoint returns 503 and no outbound calls are made.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Integration Enabled"
+  },
+  {
+   "fieldname": "column_break_integration",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "100",
+   "description": "Divisor applied to every Wave amount to convert to major currency units. Wave sends amounts in minor units (cents); leave as 100 unless that changes.",
+   "fieldname": "price_scale_divisor",
+   "fieldtype": "Int",
+   "label": "Price Scale Divisor",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "default": "14",
+   "description": "Wave Sync Log rows older than this many days are deleted by the daily retention task.",
+   "fieldname": "log_retention_days",
+   "fieldtype": "Int",
+   "label": "Log Retention (days)",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "inbound_auth_section",
+   "fieldtype": "Section Break",
+   "label": "Inbound Authentication"
+  },
+  {
+   "description": "Shared secret. Wave must send this value in the x-api-key HTTP header on every webhook. Stored encrypted.",
+   "fieldname": "inbound_api_key",
+   "fieldtype": "Password",
+   "label": "Inbound API Key"
+  },
+  {
+   "fieldname": "outbound_section",
+   "fieldtype": "Section Break",
+   "label": "Outbound (Wave API)"
+  },
+  {
+   "description": "Base URL for the Wave REST API, e.g. https://dev.hypaafrica.api.wavegrocery.com",
+   "fieldname": "wave_api_base_url",
+   "fieldtype": "Data",
+   "label": "Wave API Base URL",
+   "options": "URL"
+  },
+  {
+   "fieldname": "column_break_outbound",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "API key sent on every outbound call to Wave. Stored encrypted.",
+   "fieldname": "wave_api_key",
+   "fieldtype": "Password",
+   "label": "Wave API Key"
+  },
+  {
+   "fieldname": "erp_defaults_section",
+   "fieldtype": "Section Break",
+   "label": "ERP Defaults"
+  },
+  {
+   "description": "Company applied to every Sales Order created by this integration.",
+   "fieldname": "default_company",
+   "fieldtype": "Link",
+   "label": "Default Company",
+   "options": "Company"
+  },
+  {
+   "description": "Warehouse used as set_warehouse on every Sales Order.",
+   "fieldname": "default_warehouse",
+   "fieldtype": "Link",
+   "label": "Default Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "description": "Selling Price List that drives line-item rates. ERP is the pricing source of truth; Wave's prices are ignored.",
+   "fieldname": "default_price_list",
+   "fieldtype": "Link",
+   "label": "Default Price List",
+   "options": "Price List"
+  },
+  {
+   "description": "Currency for every Sales Order created by this integration.",
+   "fieldname": "default_currency",
+   "fieldtype": "Link",
+   "label": "Default Currency",
+   "options": "Currency"
+  },
+  {
+   "fieldname": "column_break_erp_defaults",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Customer Group assigned to Customers newly created from Wave webhooks.",
+   "fieldname": "default_customer_group",
+   "fieldtype": "Link",
+   "label": "Default Customer Group",
+   "options": "Customer Group"
+  },
+  {
+   "description": "Territory assigned to Customers newly created from Wave webhooks.",
+   "fieldname": "default_territory",
+   "fieldtype": "Link",
+   "label": "Default Territory",
+   "options": "Territory"
+  },
+  {
+   "description": "Fallback Customer for guest orders (payload isGuest=true). Must exist in ERP before orders are processed.",
+   "fieldname": "walk_in_customer",
+   "fieldtype": "Link",
+   "label": "Walk-in Customer",
+   "options": "Customer"
+  },
+  {
+   "description": "All rule tables are editable here. The integration reads them at dispatch time, so changes take effect immediately after save.",
+   "fieldname": "rules_section",
+   "fieldtype": "Section Break",
+   "label": "Rules"
+  },
+  {
+   "description": "Routes (Wave doc_type, action) pairs to a registered handler. Disabled rows are skipped.",
+   "fieldname": "route_rules",
+   "fieldtype": "Table",
+   "label": "Route Rules",
+   "options": "Wave Route Rule"
+  },
+  {
+   "description": "Inbound status transitions. Each row tells the order update handler what to do when Wave reports the given status.",
+   "fieldname": "inbound_status_rules",
+   "fieldtype": "Table",
+   "label": "Inbound Status Rules",
+   "options": "Wave Status Rule Inbound"
+  },
+  {
+   "description": "Outbound status pushes. Each row maps an ERP lifecycle event to the status string sent to Wave's changeorderstatus endpoint.",
+   "fieldname": "outbound_status_rules",
+   "fieldtype": "Table",
+   "label": "Outbound Status Rules",
+   "options": "Wave Status Rule Outbound"
+  },
+  {
+   "description": "Wave fees (SHIPPING_COST, PLASTIC_BAGS, ...) are added as Sales Order lines using the ERP Item configured here.",
+   "fieldname": "fee_mappings",
+   "fieldtype": "Table",
+   "label": "Fee Mappings",
+   "options": "Wave Fee Mapping"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-04-21 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Wave Sync Hypa",
+ "name": "Wave Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
