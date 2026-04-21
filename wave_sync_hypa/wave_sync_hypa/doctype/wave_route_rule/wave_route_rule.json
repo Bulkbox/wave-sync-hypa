@@ -1,0 +1,66 @@
+{
+ "actions": [],
+ "autoname": "autoincrement",
+ "creation": "2026-04-21 00:00:00",
+ "description": "Maps an inbound (Wave doc, action) pair to a handler. Disabled rows skip dispatch.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "doc_type",
+  "action",
+  "handler_key",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "columns": 2,
+   "description": "Wave entity, e.g. CUSTOMER, ORDER.",
+   "fieldname": "doc_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Wave Doc Type",
+   "reqd": 1
+  },
+  {
+   "columns": 2,
+   "description": "Wave action, e.g. CREATE, UPDATE, DELETE.",
+   "fieldname": "action",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Action",
+   "reqd": 1
+  },
+  {
+   "columns": 4,
+   "description": "Handler to dispatch to. Must match a key registered in services.dispatcher.HANDLER_REGISTRY.",
+   "fieldname": "handler_key",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Handler",
+   "options": "customer_upsert\norder_create\norder_update\norder_cancel\npicklist_apply\ndelivery_create\ninvoice_create\npayment_apply",
+   "reqd": 1
+  },
+  {
+   "columns": 1,
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-04-21 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Wave Sync Hypa",
+ "name": "Wave Route Rule",
+ "naming_rule": "Autoincrement",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

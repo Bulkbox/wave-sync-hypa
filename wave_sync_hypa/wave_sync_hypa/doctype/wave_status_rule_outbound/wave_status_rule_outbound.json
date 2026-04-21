@@ -1,0 +1,65 @@
+{
+ "actions": [],
+ "autoname": "autoincrement",
+ "creation": "2026-04-21 00:00:00",
+ "description": "Maps an ERP trigger to the Wave status this app should push via changeorderstatus.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "erp_trigger_key",
+  "wave_status",
+  "enabled",
+  "notes"
+ ],
+ "fields": [
+  {
+   "columns": 3,
+   "description": "ERP lifecycle event that fires this outbound push.",
+   "fieldname": "erp_trigger_key",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "ERP Trigger",
+   "options": "sales_order_submitted\nsales_order_cancelled\npick_list_draft\npick_list_submitted\ndelivery_note_submitted\nsales_invoice_submitted\npayment_entry_submitted_partial\npayment_entry_submitted_full",
+   "reqd": 1
+  },
+  {
+   "columns": 2,
+   "description": "Exact status string sent to Wave (e.g. ACCEPTED, UNDER_PICKING, COMPLETED).",
+   "fieldname": "wave_status",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Wave Status",
+   "reqd": 1
+  },
+  {
+   "columns": 1,
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "columns": 4,
+   "description": "Optional human-readable reason, shown in the rules grid.",
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-04-21 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Wave Sync Hypa",
+ "name": "Wave Status Rule Outbound",
+ "naming_rule": "Autoincrement",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
