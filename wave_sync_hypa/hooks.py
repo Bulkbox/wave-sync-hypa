@@ -164,6 +164,7 @@ fixtures = [
 		"filters": [["name", "like", "%-wave_%"]],
 	},
 	"Wave Status",
+	"Wave Action",
 ]
 
 # Testing
