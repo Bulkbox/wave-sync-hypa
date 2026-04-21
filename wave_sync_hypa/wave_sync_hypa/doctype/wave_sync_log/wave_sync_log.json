@@ -1,0 +1,204 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-04-21 00:00:00",
+ "description": "Append-only audit trail for every inbound Wave webhook and every processing step it triggers.",
+ "doctype": "DocType",
+ "document_type": "Other",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "meta_section",
+  "correlation_id",
+  "step",
+  "level",
+  "column_break_meta",
+  "doc_type",
+  "action",
+  "wave_id",
+  "friendly_id",
+  "link_section",
+  "linked_doctype",
+  "linked_docname",
+  "column_break_link",
+  "duration_ms",
+  "payload_section",
+  "request_body",
+  "response_body",
+  "error_section",
+  "error_message",
+  "stack_trace"
+ ],
+ "fields": [
+  {
+   "fieldname": "meta_section",
+   "fieldtype": "Section Break",
+   "label": "Event"
+  },
+  {
+   "description": "UUID that links every row produced by one webhook from receipt through completion.",
+   "fieldname": "correlation_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Correlation ID",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Which pipeline stage emitted this row.",
+   "fieldname": "step",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Step",
+   "options": "Received\nAuthenticated\nEnqueued\nProcessing\nResolved Customer\nResolved Items\nSO Created\nSO Updated\nOutbound Sent\nCompleted\nSkipped\nFailed\nAction Required",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "description": "Severity of this row. Used by dashboards and retention policy.",
+   "fieldname": "level",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Level",
+   "options": "Info\nSuccess\nWarning\nError",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Wave entity the webhook targets, e.g. CUSTOMER, ORDER.",
+   "fieldname": "doc_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Wave Doc Type",
+   "read_only": 1
+  },
+  {
+   "description": "Wave action, e.g. CREATE, UPDATE, DELETE.",
+   "fieldname": "action",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Action",
+   "read_only": 1
+  },
+  {
+   "description": "Wave payload _id (primary key on Wave's side).",
+   "fieldname": "wave_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Wave ID",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Human-readable Wave identifier (e.g. order friendlyId).",
+   "fieldname": "friendly_id",
+   "fieldtype": "Data",
+   "label": "Friendly ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "link_section",
+   "fieldtype": "Section Break",
+   "label": "ERP Link"
+  },
+  {
+   "description": "ERP DocType touched by this step, if any.",
+   "fieldname": "linked_doctype",
+   "fieldtype": "Data",
+   "label": "Linked DocType",
+   "read_only": 1
+  },
+  {
+   "description": "ERP document name touched by this step, if any.",
+   "fieldname": "linked_docname",
+   "fieldtype": "Data",
+   "label": "Linked Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_link",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Wall time this step took, in milliseconds. Useful for spotting slow outbound calls.",
+   "fieldname": "duration_ms",
+   "fieldtype": "Int",
+   "label": "Duration (ms)",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "payload_section",
+   "fieldtype": "Section Break",
+   "label": "Payload"
+  },
+  {
+   "description": "JSON snapshot of the inbound request body or the data the step operated on.",
+   "fieldname": "request_body",
+   "fieldtype": "Long Text",
+   "label": "Request Body",
+   "read_only": 1
+  },
+  {
+   "description": "JSON snapshot of the outbound response, the resolved ERP record, or other step output.",
+   "fieldname": "response_body",
+   "fieldtype": "Long Text",
+   "label": "Response Body",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "depends_on": "eval:doc.level===\"Error\"",
+   "fieldname": "error_section",
+   "fieldtype": "Section Break",
+   "label": "Error"
+  },
+  {
+   "description": "One-line error summary. Empty unless level is Error.",
+   "fieldname": "error_message",
+   "fieldtype": "Small Text",
+   "label": "Error Message",
+   "read_only": 1
+  },
+  {
+   "description": "Full Python traceback, if one was captured.",
+   "fieldname": "stack_trace",
+   "fieldtype": "Long Text",
+   "label": "Stack Trace",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-04-21 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Wave Sync Hypa",
+ "name": "Wave Sync Log",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "correlation_id",
+ "track_changes": 0
+}
