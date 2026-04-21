@@ -1,0 +1,66 @@
+[
+ {
+  "doctype": "Wave Status",
+  "name": "PENDING",
+  "status_name": "PENDING",
+  "direction": "Inbound",
+  "enabled": 1,
+  "description": "Order created on Wave, awaiting ERP acceptance."
+ },
+ {
+  "doctype": "Wave Status",
+  "name": "ACCEPTED",
+  "status_name": "ACCEPTED",
+  "direction": "Outbound",
+  "enabled": 1,
+  "description": "ERP has submitted the Sales Order; push ACCEPTED to Wave."
+ },
+ {
+  "doctype": "Wave Status",
+  "name": "REJECTED",
+  "status_name": "REJECTED",
+  "direction": "Outbound",
+  "enabled": 1,
+  "description": "ERP refused the order (out of stock, invalid customer, etc.)."
+ },
+ {
+  "doctype": "Wave Status",
+  "name": "UNDER_PICKING",
+  "status_name": "UNDER_PICKING",
+  "direction": "Outbound",
+  "enabled": 1,
+  "description": "Pick list created in ERP; Wave shows batch ids per item."
+ },
+ {
+  "doctype": "Wave Status",
+  "name": "UNDER_DELIVERY",
+  "status_name": "UNDER_DELIVERY",
+  "direction": "Outbound",
+  "enabled": 1,
+  "description": "Delivery Note submitted; order is in transit."
+ },
+ {
+  "doctype": "Wave Status",
+  "name": "PAYMENT_PENDING",
+  "status_name": "PAYMENT_PENDING",
+  "direction": "Outbound",
+  "enabled": 1,
+  "description": "Sales Invoice raised; awaiting full payment reconciliation."
+ },
+ {
+  "doctype": "Wave Status",
+  "name": "COMPLETED",
+  "status_name": "COMPLETED",
+  "direction": "Outbound",
+  "enabled": 1,
+  "description": "Payment Entry submitted; order closed."
+ },
+ {
+  "doctype": "Wave Status",
+  "name": "CANCELLED",
+  "status_name": "CANCELLED",
+  "direction": "Both",
+  "enabled": 1,
+  "description": "Order cancelled on Wave (inbound) or cancelled in ERP and pushed back."
+ }
+]

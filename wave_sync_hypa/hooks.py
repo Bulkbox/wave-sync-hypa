@@ -162,7 +162,8 @@ fixtures = [
 	{
 		"doctype": "Custom Field",
 		"filters": [["name", "like", "%-wave_%"]],
-	}
+	},
+	"Wave Status",
 ]
 
 # Testing
