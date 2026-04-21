@@ -11,6 +11,9 @@ class TestResolveHandler(FrappeTestCase):
 
 	def setUp(self):
 		"""Snapshot baseline settings, clear rules, and stub one handler we can assert on."""
+		# Force handler registration up-front so snapshot captures the real callable,
+		# not the None placeholder that exists before any resolve_handler call.
+		dispatcher._ensure_handlers_loaded()
 		self._original_rules = self._snapshot_rules()
 		self._clear_rules()
 		self._original_handler = dispatcher.HANDLER_REGISTRY.get("customer_upsert")
