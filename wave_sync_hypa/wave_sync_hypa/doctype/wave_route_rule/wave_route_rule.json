@@ -24,11 +24,12 @@
   },
   {
    "columns": 2,
-   "description": "Wave action, e.g. CREATE, UPDATE, DELETE.",
+   "description": "Wave webhook action, chosen from the Wave Action catalogue. Add or disable actions under Wave Action.",
    "fieldname": "action",
-   "fieldtype": "Data",
+   "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Action",
+   "options": "Wave Action",
    "reqd": 1
   },
   {
