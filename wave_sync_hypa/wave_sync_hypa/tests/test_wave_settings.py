@@ -8,20 +8,28 @@ class TestWaveSettings(FrappeTestCase):
 	"""Invariants enforced by WaveSettings.validate."""
 
 	def setUp(self):
-		"""Load the Single and snapshot its baseline for restore in tearDown."""
-		self.settings = frappe.get_single("Wave Settings")
+		"""Snapshot current values via direct DB reads and set a known-good baseline."""
 		self._baseline = {
-			"enabled": self.settings.enabled,
-			"price_scale_divisor": self.settings.price_scale_divisor or 100,
-			"log_retention_days": self.settings.log_retention_days or 14,
+			"enabled": frappe.db.get_single_value("Wave Settings", "enabled") or 0,
+			"price_scale_divisor": frappe.db.get_single_value(
+				"Wave Settings", "price_scale_divisor"
+			) or 100,
+			"log_retention_days": frappe.db.get_single_value(
+				"Wave Settings", "log_retention_days"
+			) or 14,
 		}
+		self._write_fields(enabled=0, price_scale_divisor=100, log_retention_days=14)
+		self.settings = frappe.get_single("Wave Settings")
 
 	def tearDown(self):
-		"""Restore baseline values so later tests are not affected."""
-		fresh = frappe.get_single("Wave Settings")
-		for field, value in self._baseline.items():
-			fresh.set(field, value)
-		fresh.save(ignore_permissions=True)
+		"""Restore the snapshot directly via DB writes; validate() is exercised by the tests, not fixtures."""
+		self._write_fields(**self._baseline)
+
+	def _write_fields(self, **fields) -> None:
+		"""Persist Wave Settings fields via direct DB writes to bypass validate() in fixture lifecycle."""
+		for name, value in fields.items():
+			frappe.db.set_value("Wave Settings", "Wave Settings", name, value, update_modified=False)
+		frappe.db.commit()
 
 	def test_price_scale_divisor_must_be_positive(self):
 		"""Zero or negative divisors would break cents-to-major conversion and are rejected."""

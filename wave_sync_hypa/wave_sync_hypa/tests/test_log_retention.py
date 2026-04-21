@@ -12,12 +12,13 @@ class TestPurgeOldLogs(FrappeTestCase):
 	"""Seed rows at known creation dates, then assert only the old ones are deleted."""
 
 	def setUp(self):
-		"""Use a unique correlation id per test so tearDown can scope its cleanup."""
+		"""Use a unique correlation id per test and write a known retention window directly."""
 		self.correlation_id = frappe.generate_hash(length=16)
-		self._set_retention_days(14)
+		self._baseline_retention = frappe.db.get_single_value("Wave Settings", "log_retention_days") or 14
+		self._write_retention_days(14)
 
 	def tearDown(self):
-		"""Remove anything this test created, irrespective of age."""
+		"""Remove anything this test created and restore the baseline retention value."""
 		names = frappe.get_all(
 			"Wave Sync Log",
 			filters={"correlation_id": self.correlation_id},
@@ -25,12 +26,14 @@ class TestPurgeOldLogs(FrappeTestCase):
 		)
 		for name in names:
 			frappe.delete_doc("Wave Sync Log", name, ignore_permissions=True, delete_permanently=True)
+		self._write_retention_days(self._baseline_retention)
 
-	def _set_retention_days(self, days: int) -> None:
-		"""Tiny helper: write a retention window to Wave Settings for this test."""
-		settings = frappe.get_single("Wave Settings")
-		settings.log_retention_days = days
-		settings.save(ignore_permissions=True)
+	def _write_retention_days(self, days: int) -> None:
+		"""Persist a retention window via direct DB write to bypass unrelated validate() checks."""
+		frappe.db.set_value(
+			"Wave Settings", "Wave Settings", "log_retention_days", days, update_modified=False
+		)
+		frappe.db.commit()
 
 	def _backdate(self, log_name: str, creation) -> None:
 		"""Set a row's creation to a specific timestamp via direct SQL (bypasses framework defaults)."""
@@ -52,7 +55,7 @@ class TestPurgeOldLogs(FrappeTestCase):
 
 	def test_respects_configured_retention_window(self):
 		"""A 1-day retention window purges a 2-day-old row that a 14-day window would keep."""
-		self._set_retention_days(1)
+		self._write_retention_days(1)
 		name = log_step(self.correlation_id, "Received", "Info")
 		self._backdate(name, add_days(now_datetime(), -2))
 
