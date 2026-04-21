@@ -1,0 +1,23 @@
+[
+ {
+  "doctype": "Wave Action",
+  "name": "CREATE",
+  "action_name": "CREATE",
+  "enabled": 1,
+  "description": "Wave created a new entity. Expect this as the first webhook for a new Customer or Order."
+ },
+ {
+  "doctype": "Wave Action",
+  "name": "UPDATE",
+  "action_name": "UPDATE",
+  "enabled": 1,
+  "description": "Wave modified an existing entity. Fired on profile edits, status transitions, and order changes."
+ },
+ {
+  "doctype": "Wave Action",
+  "name": "DELETE",
+  "action_name": "DELETE",
+  "enabled": 1,
+  "description": "Wave removed an entity. ERP typically flags linked records for manual review rather than deleting."
+ }
+]
