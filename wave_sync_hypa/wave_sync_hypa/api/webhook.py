@@ -77,10 +77,23 @@ def _load_enabled_settings():
 
 
 def _authenticate(settings, correlation_id: str) -> None:
-	"""Compare the x-api-key header to the stored secret in constant time; raise WaveAuthError on mismatch."""
+	"""Compare the x-api-key header to the stored secret in constant time; raise WaveAuthError on mismatch.
+
+	The audit log is committed before we raise so it survives the transaction rollback
+	Frappe performs when the whitelisted method returns an exception. Without the commit
+	the row would be silently dropped and operators would have no record of the rejected
+	request — the exact case where the audit trail matters most.
+	"""
 	provided = _read_header("x-api-key")
 	stored = settings.get_password("inbound_api_key", raise_exception=False) or ""
 	if not stored:
+		log_step(
+			correlation_id,
+			"Authenticated",
+			"Error",
+			error_message="Inbound API key not configured on Wave Settings",
+		)
+		frappe.db.commit()
 		raise WaveAuthError("Inbound API key not configured")
 	if not provided or not hmac.compare_digest(provided, stored):
 		log_step(
@@ -89,6 +102,7 @@ def _authenticate(settings, correlation_id: str) -> None:
 			"Error",
 			error_message="x-api-key missing or mismatched",
 		)
+		frappe.db.commit()
 		raise WaveAuthError("Invalid API key")
 
 
@@ -148,13 +162,14 @@ def _job_name(doc_type: str, payload: dict) -> str:
 
 
 def _abort(exc: Exception, correlation_id: str, http_status: int):
-	"""Log the failure and translate the domain error into an HTTP response Frappe will return."""
+	"""Log the failure, commit the audit trail, and translate to an HTTP response Frappe will return."""
 	log_step(
 		correlation_id,
 		"Failed",
 		"Error",
 		error_message=str(exc)[:500],
 	)
+	frappe.db.commit()
 	frappe.local.response.http_status_code = http_status
 	frappe.local.response["ok"] = False
 	frappe.local.response["error"] = str(exc)
