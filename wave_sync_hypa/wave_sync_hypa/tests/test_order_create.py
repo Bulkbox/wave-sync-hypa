@@ -29,7 +29,9 @@ class TestOrderCreate(FrappeTestCase):
 		self.test_price_list = self._pick_enabled_selling_price_list()
 		self.product_sku, self.fee_item = self._pick_two_priced_items(self.test_price_list)
 		self._original_mappings = self._snapshot_mappings()
+		self._original_tax_rules = self._snapshot_tax_rules()
 		self._clear_mappings()
+		self._clear_tax_rules()
 		self._ensure_defaults()
 		self._add_fee_mapping("SHIPPING_COST", self.fee_item)
 
@@ -50,7 +52,9 @@ class TestOrderCreate(FrappeTestCase):
 		self._safe_delete_many("Customer", {"wave_customer_id": self.wave_user_id})
 		self._safe_delete_many("Wave Sync Log", {"correlation_id": self.correlation_id})
 		self._clear_mappings()
+		self._clear_tax_rules()
 		self._restore_mappings(self._original_mappings)
+		self._restore_tax_rules(self._original_tax_rules)
 
 	def _safe_delete_many(self, doctype: str, filters: dict) -> None:
 		"""Delete matching rows, committing between each so row locks don't cascade."""
@@ -166,6 +170,55 @@ class TestOrderCreate(FrappeTestCase):
 		settings.flags.ignore_validate = True
 		settings.save(ignore_permissions=True)
 		frappe.clear_document_cache("Wave Settings", "Wave Settings")
+
+	def _snapshot_tax_rules(self) -> list[dict]:
+		"""Capture the existing tax_rules rows so tearDown can restore them."""
+		settings = frappe.get_single("Wave Settings")
+		return [
+			{
+				"sales_taxes_and_charges_template": row.sales_taxes_and_charges_template,
+				"enabled": row.enabled,
+				"notes": row.notes,
+			}
+			for row in (settings.tax_rules or [])
+		]
+
+	def _clear_tax_rules(self) -> None:
+		"""Drop every Wave Tax Rule row via direct DB delete."""
+		frappe.db.delete("Wave Tax Rule", {"parent": "Wave Settings"})
+		frappe.db.commit()
+		frappe.clear_document_cache("Wave Settings", "Wave Settings")
+
+	def _add_tax_rule(self, template: str, enabled: int = 1) -> None:
+		"""Append a Wave Tax Rule row; bypass Link validation so tests can simulate broken references."""
+		settings = frappe.get_single("Wave Settings")
+		settings.append(
+			"tax_rules",
+			{"sales_taxes_and_charges_template": template, "enabled": enabled, "notes": "test"},
+		)
+		settings.flags.ignore_validate = True
+		settings.flags.ignore_links = True
+		settings.save(ignore_permissions=True)
+		frappe.clear_document_cache("Wave Settings", "Wave Settings")
+
+	def _restore_tax_rules(self, rows: list[dict]) -> None:
+		"""Reinstate tax_rules from the snapshot."""
+		settings = frappe.get_single("Wave Settings")
+		settings.tax_rules = []
+		for row in rows:
+			settings.append("tax_rules", row)
+		settings.flags.ignore_validate = True
+		settings.save(ignore_permissions=True)
+		frappe.clear_document_cache("Wave Settings", "Wave Settings")
+
+	def _pick_tax_template_for_default_company(self) -> str | None:
+		"""Return an enabled Sales Taxes and Charges Template matching the default company, or None."""
+		company = frappe.db.get_single_value("Wave Settings", "default_company")
+		if not company:
+			return None
+		return frappe.db.get_value(
+			"Sales Taxes and Charges Template", {"company": company, "disabled": 0}, "name"
+		)
 
 	def _payload(self, **overrides) -> dict:
 		"""Build a minimal ORDER.CREATE payload shaped like the Wave sample."""
@@ -358,3 +411,71 @@ class TestOrderCreate(FrappeTestCase):
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(rows[0].linked_doctype, "Sales Order")
 		self.assertEqual(rows[0].linked_docname, so_name)
+
+	def test_tax_rule_enabled_stamps_template_and_populates_taxes(self):
+		"""An enabled Wave Tax Rule puts taxes_and_charges on the SO and ERPNext copies the template's rows."""
+		template = self._pick_tax_template_for_default_company()
+		if not template:
+			self.skipTest("No Sales Taxes and Charges Template available for the default company.")
+		self._add_tax_rule(template)
+		handle(self._payload(), self.correlation_id)
+		name = frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		so = frappe.get_doc("Sales Order", name)
+		self.assertEqual(so.taxes_and_charges, template)
+		self.assertGreaterEqual(
+			len(so.taxes),
+			1,
+			"ERPNext should have auto-populated the SO's taxes table from the template.",
+		)
+
+	def test_no_tax_rule_results_in_so_without_template(self):
+		"""With no tax rules configured the handler does not set taxes_and_charges.
+
+		ERPNext (via kenya_compliance_via_slade or a default tax mechanism) may still
+		auto-populate the SO's taxes table from other sources; we only assert on the
+		field this handler controls.
+		"""
+		handle(self._payload(), self.correlation_id)
+		name = frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		so = frappe.get_doc("Sales Order", name)
+		self.assertFalse(so.taxes_and_charges)
+
+	def test_disabled_tax_rule_is_ignored(self):
+		"""A disabled Wave Tax Rule is as good as absent; no template is applied."""
+		template = self._pick_tax_template_for_default_company()
+		if not template:
+			self.skipTest("No Sales Taxes and Charges Template available for the default company.")
+		self._add_tax_rule(template, enabled=0)
+		handle(self._payload(), self.correlation_id)
+		name = frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		so = frappe.get_doc("Sales Order", name)
+		self.assertFalse(so.taxes_and_charges)
+
+	def test_missing_template_soft_fails_with_log_flag_and_comment(self):
+		"""A rule referencing a non-existent template drafts the SO without taxes, flags review, logs, comments."""
+		self._add_tax_rule("WAVE_SYNC_NONEXISTENT_TEMPLATE")
+		handle(self._payload(), self.correlation_id)
+		name = frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		self.assertIsNotNone(name, "SO must still be created when the tax template is missing.")
+		so = frappe.get_doc("Sales Order", name)
+		self.assertFalse(so.taxes_and_charges)
+		self.assertEqual(int(so.wave_manual_review_required or 0), 1)
+		logs = frappe.get_all(
+			"Wave Sync Log",
+			filters={"correlation_id": self.correlation_id, "step": "Action Required"},
+			fields=["response_body", "error_message"],
+		)
+		self.assertEqual(len(logs), 1)
+		self.assertIn("template_missing", logs[0].response_body or "")
+		comments = frappe.get_all(
+			"Comment",
+			filters={
+				"reference_doctype": "Sales Order",
+				"reference_name": name,
+				"comment_type": "Comment",
+			},
+			fields=["content"],
+		)
+		self.assertEqual(len(comments), 1)
+		self.assertIn("Tax Rules", comments[0].content)
+		self.assertIn("WAVE_SYNC_NONEXISTENT_TEMPLATE", comments[0].content)
