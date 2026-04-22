@@ -153,3 +153,47 @@ class TestReceive(FrappeTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			receive()
 		self.assertEqual(frappe.local.response.http_status_code, 400)
+
+	def test_auth_failure_log_survives_rollback(self):
+		"""A rejected webhook must leave an audit row even after Frappe rolls the request back.
+
+		The receive() handler commits the Authenticated/Error row (and the subsequent
+		Failed row via _abort) before raising, so the rollback that Frappe's request
+		handler performs on an unhandled exception does not erase the audit trail.
+		"""
+		self._wave_id_new()
+		self._request(
+			{"x-api-key": "definitely-wrong-key"},
+			"doc=CUSTOMER",
+			{"action": "UPDATE", "payload": {"_id": "x", "updatedAt": "1"}},
+		)
+		try:
+			receive()
+		except frappe.PermissionError:
+			pass
+		correlation_id = frappe.local.response.get("correlation_id")
+		self.assertTrue(correlation_id, "_abort must return a correlation id in the response.")
+		# Simulate the rollback Frappe would perform on the exception it just re-raised.
+		frappe.db.rollback()
+		logs = frappe.get_all(
+			"Wave Sync Log",
+			filters={"correlation_id": correlation_id},
+			fields=["step", "level", "error_message"],
+		)
+		steps = {row.step for row in logs}
+		self.assertIn(
+			"Authenticated",
+			steps,
+			"The Authenticated/Error row must be committed before the 403 raise.",
+		)
+		self.assertIn(
+			"Failed",
+			steps,
+			"The Failed row in _abort must be committed before the 403 raise.",
+		)
+		# Cleanup: the committed log rows won't roll back with tearDown's rollback.
+		for name in frappe.get_all(
+			"Wave Sync Log", filters={"correlation_id": correlation_id}, pluck="name"
+		):
+			frappe.delete_doc("Wave Sync Log", name, ignore_permissions=True, delete_permanently=True)
+		frappe.db.commit()

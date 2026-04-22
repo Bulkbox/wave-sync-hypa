@@ -74,6 +74,33 @@ class TestWaveSettings(FrappeTestCase):
 		reloaded = frappe.get_single("Wave Settings")
 		self.assertEqual(reloaded.get_password("inbound_api_key", raise_exception=False), "A" * 32)
 
+	def test_inbound_api_key_non_ascii_character_rejected(self):
+		"""A 32-char key containing £ (non-ASCII) is rejected — HTTP header encoding is ambiguous."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "g%be4EFKU/7]_rEz/<<s£Aj21'$&RU:N"  # real-world broken key
+		with self.assertRaises(frappe.ValidationError):
+			self.settings.save(ignore_permissions=True)
+
+	def test_inbound_api_key_shell_special_chars_rejected(self):
+		"""A 32-char key containing $, &, ' breaks shell-quoted curls; reject at save time."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "abc" + "$" * 4 + "def" + "&" * 4 + "ghi" + "'" * 4 + "AAAAAAAAAAA"
+		with self.assertRaises(frappe.ValidationError):
+			self.settings.save(ignore_permissions=True)
+
+	def test_inbound_api_key_slash_plus_equals_rejected(self):
+		"""Standard base64 alphabet (with /, +, =) is NOT URL-safe; reject."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "a" * 30 + "/="
+		with self.assertRaises(frappe.ValidationError):
+			self.settings.save(ignore_permissions=True)
+
+	def test_inbound_api_key_url_safe_accepted(self):
+		"""The full URL-safe charset (letters, digits, underscore, hyphen) saves cleanly."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "A-B_c" + "d" * 27  # 32 chars, URL-safe
+		self.settings.save(ignore_permissions=True)
+
 	def test_masked_inbound_key_does_not_retrigger_length_check(self):
 		"""Re-saving without touching the Password field (value comes in as a mask) must not raise."""
 		self.settings.enabled = 1

@@ -74,10 +74,10 @@
    "label": "Inbound Authentication"
   },
   {
-   "description": "Shared secret. Wave must send this value in the x-api-key HTTP header on every webhook. Must be exactly 32 characters long (generate with `python -c 'import secrets; print(secrets.token_urlsafe(24))'`). Stored encrypted.",
+   "description": "Shared secret. Wave must send this value in the x-api-key HTTP header on every webhook. Must be exactly 32 URL-safe characters (A-Z, a-z, 0-9, underscore, or hyphen only) — generate with `python -c 'import secrets; print(secrets.token_urlsafe(24))'`. Non-URL-safe characters (e.g. £, $, &, ', <, >, /, %) are rejected because they break in HTTP headers, shells, or proxies. Stored encrypted.",
    "fieldname": "inbound_api_key",
    "fieldtype": "Password",
-   "label": "Inbound API Key (32 chars)"
+   "label": "Inbound API Key (32 URL-safe chars)"
   },
   {
    "fieldname": "outbound_section",
