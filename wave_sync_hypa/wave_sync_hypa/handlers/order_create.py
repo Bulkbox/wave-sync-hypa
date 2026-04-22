@@ -35,6 +35,7 @@ def handle(payload: dict, correlation_id: str) -> None:
 	shipping_address = _resolve_shipping_address(customer_name, payload)
 
 	sales_order = _build_sales_order_header(settings, customer_name, shipping_address, payload, correlation_id)
+	skipped_tax = _apply_tax_template(sales_order, settings)
 	_append_product_lines(sales_order, payload, correlation_id)
 	skipped_fees = _append_fee_lines(sales_order, payload, settings)
 	_persist_sales_order(sales_order)
@@ -42,6 +43,10 @@ def handle(payload: dict, correlation_id: str) -> None:
 	if skipped_fees:
 		_annotate_sales_order_for_skipped_fees(
 			sales_order.name, payload, correlation_id, skipped_fees
+		)
+	if skipped_tax:
+		_annotate_sales_order_for_skipped_tax(
+			sales_order.name, payload, correlation_id, skipped_tax
 		)
 
 	_log_sales_order_created(correlation_id, payload, sales_order.name)
@@ -130,6 +135,37 @@ def _build_sales_order_header(
 			"wave_correlation_id": correlation_id,
 		}
 	)
+
+
+def _apply_tax_template(sales_order, settings) -> dict | None:
+	"""Stamp the first enabled Wave Tax Rule's template on the SO; return a skip reason if none applied.
+
+	ERPNext's selling controller copies the template's rows into `sales_order.taxes` at
+	validate time, so we only need to set `taxes_and_charges` here. If the matched rule
+	references a template that does not exist or is disabled we return a descriptor for
+	the caller to annotate the SO with — we never block the order on a tax rule.
+	"""
+	for rule in settings.get("tax_rules") or []:
+		if not rule.enabled:
+			continue
+		template = rule.sales_taxes_and_charges_template
+		if not template:
+			continue
+		skip_reason = _validate_tax_template(template)
+		if skip_reason:
+			return {"template": template, "reason": skip_reason}
+		sales_order.taxes_and_charges = template
+		return None
+	return None
+
+
+def _validate_tax_template(template_name: str) -> str | None:
+	"""Return a short reason string if the template is unusable; None if it can be applied."""
+	if not frappe.db.exists("Sales Taxes and Charges Template", template_name):
+		return "template_missing"
+	if frappe.db.get_value("Sales Taxes and Charges Template", template_name, "disabled"):
+		return "template_disabled"
+	return None
 
 
 def _append_product_lines(sales_order, payload: dict, correlation_id: str) -> None:
@@ -353,6 +389,85 @@ def _render_skipped_fee_row(entry: dict) -> str:
 		amount_major=float(entry.get("amount_major") or 0.0),
 		amount_cents=escape_html(str(entry.get("amount_cents") or "—")),
 		error=escape_html(entry.get("error") or ""),
+	)
+
+
+def _annotate_sales_order_for_skipped_tax(
+	sales_order_name: str,
+	payload: dict,
+	correlation_id: str,
+	skipped: dict,
+) -> None:
+	"""Flag the SO for manual review, log the skip, and attach a Comment describing the broken Tax Rule."""
+	_flag_manual_review(sales_order_name)
+	_log_skipped_tax(correlation_id, payload, sales_order_name, skipped)
+	_add_skipped_tax_comment(sales_order_name, payload, correlation_id, skipped)
+
+
+def _log_skipped_tax(
+	correlation_id: str,
+	payload: dict,
+	sales_order_name: str,
+	skipped: dict,
+) -> None:
+	"""Write one Action Required log row describing the broken Wave Tax Rule."""
+	log_step(
+		correlation_id,
+		"Action Required",
+		"Warning",
+		doc_type="ORDER",
+		action="CREATE",
+		wave_id=payload.get("_id"),
+		wave_updated_at=payload.get("updatedAt"),
+		friendly_id=payload.get("friendlyId"),
+		linked_doctype="Sales Order",
+		linked_docname=sales_order_name,
+		error_message=(
+			f"Wave Tax Rule references template {skipped.get('template')!r} "
+			f"({skipped.get('reason')}); no tax template applied to this SO."
+		)[:500],
+		response_body={
+			"template": skipped.get("template"),
+			"reason": skipped.get("reason"),
+			"resolution": (
+				"Open Wave Settings > Rules > Tax Rules, either replace or enable the "
+				"referenced Sales Taxes and Charges Template, then set Taxes and Charges "
+				"on this Sales Order manually or re-trigger the webhook."
+			),
+		},
+	)
+
+
+def _add_skipped_tax_comment(
+	sales_order_name: str,
+	payload: dict,
+	correlation_id: str,
+	skipped: dict,
+) -> None:
+	"""Attach a single descriptive Comment to the SO explaining why no tax template was applied."""
+	doc = frappe.get_doc("Sales Order", sales_order_name)
+	doc.add_comment("Comment", _build_skipped_tax_comment_html(payload, correlation_id, skipped))
+
+
+def _build_skipped_tax_comment_html(payload: dict, correlation_id: str, skipped: dict) -> str:
+	"""Render the Comment body explaining the broken Tax Rule and how to fix it."""
+	return (
+		"<div><b>Wave Sync &mdash; manual review required.</b></div>"
+		"<div>No Sales Taxes and Charges Template was applied to this Sales Order "
+		f"because the configured Wave Tax Rule references <b>{escape_html(skipped.get('template') or '—')}</b>, "
+		f"which is <i>{escape_html(skipped.get('reason') or 'unusable')}</i>.</div>"
+		"<div><b>To resolve:</b></div>"
+		"<ol>"
+		"<li>Open <i>Wave Settings &rarr; Rules &rarr; Tax Rules</i>.</li>"
+		"<li>Replace the referenced template, or restore/enable it under "
+		"<i>Sales Taxes and Charges Template</i>.</li>"
+		"<li>Set <i>Taxes and Charges</i> on this Sales Order manually, or cancel "
+		"and re-trigger the ORDER webhook from Wave.</li>"
+		"<li>Clear the <i>Wave Manual Review Required</i> flag on this Sales Order.</li>"
+		"</ol>"
+		f"<div><b>Wave order:</b> {escape_html(payload.get('friendlyId') or '—')} "
+		f"(ID: {escape_html(payload.get('_id') or '—')})<br>"
+		f"<b>Correlation:</b> {escape_html(correlation_id)}</div>"
 	)
 
 

@@ -1,0 +1,55 @@
+{
+ "actions": [],
+ "autoname": "autoincrement",
+ "creation": "2026-04-22 00:00:00",
+ "description": "Points the ORDER.CREATE handler at a Sales Taxes and Charges Template to stamp on every draft Sales Order.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "sales_taxes_and_charges_template",
+  "enabled",
+  "notes"
+ ],
+ "fields": [
+  {
+   "columns": 5,
+   "description": "Existing Sales Taxes and Charges Template to apply to draft Sales Orders created from Wave ORDER.CREATE webhooks. ERPNext copies the template's rows into the Sales Order's taxes table automatically at validate time.",
+   "fieldname": "sales_taxes_and_charges_template",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Sales Taxes and Charges Template",
+   "options": "Sales Taxes and Charges Template",
+   "reqd": 1
+  },
+  {
+   "columns": 1,
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "columns": 5,
+   "description": "Optional reason shown in the grid, e.g. 'KE VAT 16%' or 'Zero-rated exports'.",
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-04-22 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Wave Sync Hypa",
+ "name": "Wave Tax Rule",
+ "naming_rule": "Autoincrement",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
