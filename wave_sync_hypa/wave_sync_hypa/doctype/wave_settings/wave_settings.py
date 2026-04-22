@@ -1,10 +1,13 @@
 """Controller for the Wave Settings Single DocType."""
 
+import re
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
 
 INBOUND_API_KEY_LENGTH = 32
+INBOUND_API_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class WaveSettings(Document):
@@ -19,7 +22,7 @@ class WaveSettings(Document):
 		self._validate_positive_int("price_scale_divisor")
 		self._validate_positive_int("log_retention_days")
 		self._validate_enabled_requires_keys()
-		self._validate_inbound_api_key_length()
+		self._validate_inbound_api_key_format()
 
 	def _validate_positive_int(self, fieldname: str) -> None:
 		"""Refuse zero or negative values for numeric fields that drive math or retention."""
@@ -48,13 +51,20 @@ class WaveSettings(Document):
 			return
 		frappe.throw(_("Inbound API Key is required when the integration is enabled."))
 
-	def _validate_inbound_api_key_length(self) -> None:
-		"""Require the inbound key to be exactly INBOUND_API_KEY_LENGTH characters when a new value is provided.
+	def _validate_inbound_api_key_format(self) -> None:
+		"""Require the inbound key to be exactly 32 URL-safe characters when a new value is provided.
 
-		A masked value means the user has not touched the field on this save, so
-		we skip the length check (the stored value was validated when it was set).
-		An empty value is handled by `_validate_enabled_requires_keys`; we do not
-		re-raise a second error here.
+		Restricting the charset to [A-Za-z0-9_-] matches `secrets.token_urlsafe` output
+		and prevents three classes of silent auth failures:
+		  - non-ASCII characters (e.g. £) get re-encoded differently by HTTP clients
+			and Frappe's header reader, breaking the constant-time compare.
+		  - shell-special characters ($, &, ', <, >) mangle when a test or n8n client
+			interpolates the key into a quoted command.
+		  - URL/JSON-sensitive characters (%, :, /) break some proxy configurations.
+
+		A masked value means the user has not touched the field on this save, so we
+		skip the format check entirely. An empty value is handled by
+		`_validate_enabled_requires_keys`.
 		"""
 		current = self.inbound_api_key or ""
 		if not current:
@@ -65,5 +75,13 @@ class WaveSettings(Document):
 			frappe.throw(
 				_("Inbound API Key must be exactly {0} characters long (got {1}).").format(
 					INBOUND_API_KEY_LENGTH, len(current)
+				)
+			)
+		if not INBOUND_API_KEY_PATTERN.match(current):
+			frappe.throw(
+				_(
+					"Inbound API Key must contain only URL-safe characters: A-Z, a-z, 0-9, "
+					"underscore, or hyphen. Generate a compliant key with: "
+					"python -c 'import secrets; print(secrets.token_urlsafe(24))'"
 				)
 			)
