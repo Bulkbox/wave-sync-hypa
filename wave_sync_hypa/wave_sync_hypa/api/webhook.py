@@ -15,6 +15,7 @@ Flow per request:
  7. Log "Enqueued" and return 200 immediately.
 """
 
+import hashlib
 import hmac
 
 import frappe
@@ -100,7 +101,8 @@ def _authenticate(settings, correlation_id: str) -> None:
 			correlation_id,
 			"Authenticated",
 			"Error",
-			error_message="x-api-key missing or mismatched",
+			error_message=_auth_mismatch_diagnostic(provided, stored),
+			response_body=_auth_mismatch_fingerprints(provided, stored),
 		)
 		frappe.db.commit()
 		raise WaveAuthError("Invalid API key")
@@ -112,6 +114,41 @@ def _read_header(name: str) -> str:
 	if request is None or not getattr(request, "headers", None):
 		return ""
 	return request.headers.get(name) or ""
+
+
+def _auth_mismatch_diagnostic(provided: str, stored: str) -> str:
+	"""Return a short one-line summary of why the x-api-key comparison failed."""
+	if not provided:
+		return "x-api-key header missing from the request"
+	if len(provided) != len(stored):
+		return (
+			f"x-api-key length mismatch (provided={len(provided)}, "
+			f"stored={len(stored)}) — check the client is sending the full value without truncation or extra whitespace"
+		)
+	return (
+		"x-api-key content mismatch (same length) — rotate the key and update the client, "
+		"or check for stale credentials cached in the client"
+	)
+
+
+def _auth_mismatch_fingerprints(provided: str, stored: str) -> dict:
+	"""Return secret-safe fingerprints so operators can compare server vs. client without leaking the key."""
+	return {
+		"provided_length": len(provided or ""),
+		"stored_length": len(stored or ""),
+		"provided_sha256_prefix": _sha_prefix(provided),
+		"stored_sha256_prefix": _sha_prefix(stored),
+		"provided_is_ascii": (provided or "").isascii(),
+		"provided_first_4": (provided or "")[:4],
+		"provided_last_4": (provided or "")[-4:] if provided else "",
+	}
+
+
+def _sha_prefix(value: str) -> str:
+	"""Return the first 16 hex chars of the SHA256 digest — enough for comparison, not enough to brute force."""
+	if not value:
+		return ""
+	return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _read_doc_query() -> str:
