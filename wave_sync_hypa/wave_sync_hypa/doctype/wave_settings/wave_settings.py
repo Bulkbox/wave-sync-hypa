@@ -4,6 +4,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+INBOUND_API_KEY_LENGTH = 32
+
 
 class WaveSettings(Document):
 	"""Single config controller.
@@ -17,6 +19,7 @@ class WaveSettings(Document):
 		self._validate_positive_int("price_scale_divisor")
 		self._validate_positive_int("log_retention_days")
 		self._validate_enabled_requires_keys()
+		self._validate_inbound_api_key_length()
 
 	def _validate_positive_int(self, fieldname: str) -> None:
 		"""Refuse zero or negative values for numeric fields that drive math or retention."""
@@ -44,3 +47,23 @@ class WaveSettings(Document):
 			# User provided a real new key inline; save will persist it.
 			return
 		frappe.throw(_("Inbound API Key is required when the integration is enabled."))
+
+	def _validate_inbound_api_key_length(self) -> None:
+		"""Require the inbound key to be exactly INBOUND_API_KEY_LENGTH characters when a new value is provided.
+
+		A masked value means the user has not touched the field on this save, so
+		we skip the length check (the stored value was validated when it was set).
+		An empty value is handled by `_validate_enabled_requires_keys`; we do not
+		re-raise a second error here.
+		"""
+		current = self.inbound_api_key or ""
+		if not current:
+			return
+		if all(c == "*" for c in current):
+			return
+		if len(current) != INBOUND_API_KEY_LENGTH:
+			frappe.throw(
+				_("Inbound API Key must be exactly {0} characters long (got {1}).").format(
+					INBOUND_API_KEY_LENGTH, len(current)
+				)
+			)
