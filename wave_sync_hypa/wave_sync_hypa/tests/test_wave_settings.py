@@ -49,3 +49,38 @@ class TestWaveSettings(FrappeTestCase):
 		self.settings.inbound_api_key = ""
 		with self.assertRaises(frappe.ValidationError):
 			self.settings.save(ignore_permissions=True)
+
+	def test_inbound_api_key_must_be_32_chars_short_rejected(self):
+		"""A key shorter than 32 characters is rejected — weak entropy, off the integration standard."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "x" * 20
+		with self.assertRaises(frappe.ValidationError):
+			self.settings.save(ignore_permissions=True)
+
+	def test_inbound_api_key_must_be_32_chars_long_rejected(self):
+		"""A key longer than 32 characters is rejected — usually a paste mistake."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "x" * 40
+		with self.assertRaises(frappe.ValidationError):
+			self.settings.save(ignore_permissions=True)
+
+	def test_inbound_api_key_32_chars_accepted(self):
+		"""A key that is exactly 32 characters long saves successfully."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "A" * 32
+		# Should not raise.
+		self.settings.save(ignore_permissions=True)
+		# Confirm the stored password round-trips.
+		reloaded = frappe.get_single("Wave Settings")
+		self.assertEqual(reloaded.get_password("inbound_api_key", raise_exception=False), "A" * 32)
+
+	def test_masked_inbound_key_does_not_retrigger_length_check(self):
+		"""Re-saving without touching the Password field (value comes in as a mask) must not raise."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "B" * 32
+		self.settings.save(ignore_permissions=True)
+		# Simulate the UI behaviour: reload and save again with the masked value.
+		reloaded = frappe.get_single("Wave Settings")
+		reloaded.inbound_api_key = "*" * 12   # shorter than 32 but fully masked
+		# Should not raise — a masked value means "no change to the stored secret".
+		reloaded.save(ignore_permissions=True)
