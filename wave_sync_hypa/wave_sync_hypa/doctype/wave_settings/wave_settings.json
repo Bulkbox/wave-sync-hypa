@@ -30,7 +30,8 @@
   "route_rules",
   "inbound_status_rules",
   "outbound_status_rules",
-  "fee_mappings"
+  "fee_mappings",
+  "tax_rules"
  ],
  "fields": [
   {
@@ -191,6 +192,13 @@
    "fieldtype": "Table",
    "label": "Fee Mappings",
    "options": "Wave Fee Mapping"
+  },
+  {
+   "description": "Sales Taxes and Charges Templates stamped on every draft Sales Order created from ORDER.CREATE webhooks. The first enabled row whose template exists and is not disabled wins; ERPNext copies the template's tax rows into the Sales Order automatically.",
+   "fieldname": "tax_rules",
+   "fieldtype": "Table",
+   "label": "Tax Rules",
+   "options": "Wave Tax Rule"
   }
  ],
  "index_web_pages_for_search": 1,
