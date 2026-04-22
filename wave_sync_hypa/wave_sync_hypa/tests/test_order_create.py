@@ -36,6 +36,14 @@ class TestOrderCreate(FrappeTestCase):
 	def tearDown(self):
 		"""Roll back any half-open transaction, then remove ERP rows this test created."""
 		frappe.db.rollback()
+		# Drop the SO's comments before the SO itself so no orphan references linger.
+		so_names = frappe.get_all(
+			"Sales Order", filters={"wave_order_id": self.wave_order_id}, pluck="name"
+		)
+		for so_name in so_names:
+			self._safe_delete_many(
+				"Comment", {"reference_doctype": "Sales Order", "reference_name": so_name}
+			)
 		self._safe_delete_many("Sales Order", {"wave_order_id": self.wave_order_id})
 		self._safe_delete_many("Address", {"wave_address_id": self.wave_address_id})
 		self._safe_delete_many("Contact", {"wave_contact_id": self.wave_user_id})
@@ -237,11 +245,94 @@ class TestOrderCreate(FrappeTestCase):
 		with self.assertRaises(WaveResolutionError):
 			handle(payload, self.correlation_id)
 
-	def test_missing_fee_mapping_raises_resolution_error(self):
-		"""A fee type without a Wave Fee Mapping row raises a WaveResolutionError."""
-		payload = self._payload(fees=[{"type": "UNMAPPED_FEE", "amount": 500}])
-		with self.assertRaises(WaveResolutionError):
-			handle(payload, self.correlation_id)
+	def test_missing_fee_mapping_still_creates_draft_sales_order(self):
+		"""Unmapped fee: SO drafts with products only; the unmapped fee line is absent, no raise."""
+		payload = self._payload(fees=[{"type": "UNMAPPED_FEE_TYPE", "amount": 500}])
+		handle(payload, self.correlation_id)
+		name = frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		self.assertIsNotNone(name, "Sales Order must still be created when a fee mapping is missing.")
+		so = frappe.get_doc("Sales Order", name)
+		item_codes = [row.item_code for row in so.items]
+		self.assertIn(self.product_sku, item_codes, "Product line must be preserved.")
+		self.assertNotIn(
+			self.fee_item,
+			item_codes,
+			"The SHIPPING_COST fee line should be absent because the payload uses a different fee type.",
+		)
+
+	def test_missing_fee_mapping_flags_manual_review(self):
+		"""An unmapped fee sets wave_manual_review_required=1 on the Sales Order for operator triage."""
+		payload = self._payload(fees=[{"type": "UNMAPPED_FEE_TYPE", "amount": 500}])
+		handle(payload, self.correlation_id)
+		name = frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		flag = frappe.db.get_value("Sales Order", name, "wave_manual_review_required")
+		self.assertEqual(int(flag or 0), 1)
+
+	def test_missing_fee_mapping_writes_action_required_log(self):
+		"""Each skipped fee writes one Action Required / Warning row with the fee type and amount."""
+		payload = self._payload(
+			fees=[
+				{"type": "UNMAPPED_FEE_ALPHA", "amount": 500},
+				{"type": "UNMAPPED_FEE_BETA", "amount": 750},
+			]
+		)
+		handle(payload, self.correlation_id)
+		rows = frappe.get_all(
+			"Wave Sync Log",
+			filters={
+				"correlation_id": self.correlation_id,
+				"step": "Action Required",
+			},
+			fields=["level", "response_body", "error_message"],
+		)
+		self.assertEqual(len(rows), 2, "One Action Required row per skipped fee.")
+		self.assertTrue(all(r.level == "Warning" for r in rows))
+		combined_bodies = " ".join(r.response_body or "" for r in rows)
+		self.assertIn("UNMAPPED_FEE_ALPHA", combined_bodies)
+		self.assertIn("UNMAPPED_FEE_BETA", combined_bodies)
+
+	def test_missing_fee_mapping_adds_comment_on_sales_order(self):
+		"""A single descriptive Comment is attached to the SO listing every skipped fee."""
+		payload = self._payload(
+			fees=[
+				{"type": "UNMAPPED_FEE_GAMMA", "amount": 1250},
+			]
+		)
+		handle(payload, self.correlation_id)
+		name = frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		comments = frappe.get_all(
+			"Comment",
+			filters={
+				"reference_doctype": "Sales Order",
+				"reference_name": name,
+				"comment_type": "Comment",
+			},
+			fields=["content"],
+		)
+		self.assertEqual(len(comments), 1)
+		body = comments[0].content
+		self.assertIn("UNMAPPED_FEE_GAMMA", body)
+		self.assertIn("Fee Mappings", body)
+		self.assertIn(self.wave_order_id, body)
+
+	def test_resolvable_fees_mixed_with_unmapped_still_add_the_resolvable_lines(self):
+		"""A mix of mapped and unmapped fees: the mapped fee lands as a line; the unmapped one is skipped + logged."""
+		payload = self._payload(
+			fees=[
+				{"type": "SHIPPING_COST", "amount": 20000},
+				{"type": "UNMAPPED_FEE_DELTA", "amount": 500},
+			]
+		)
+		handle(payload, self.correlation_id)
+		name = frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		so = frappe.get_doc("Sales Order", name)
+		fee_rows = [row for row in so.items if row.item_code == self.fee_item]
+		self.assertEqual(len(fee_rows), 1, "Mapped SHIPPING_COST fee must still be added.")
+		action_logs = frappe.get_all(
+			"Wave Sync Log",
+			filters={"correlation_id": self.correlation_id, "step": "Action Required"},
+		)
+		self.assertEqual(len(action_logs), 1, "One Action Required row for the unmapped fee.")
 
 	def test_missing_user_id_raises_validation_error(self):
 		"""A payload without user._id is malformed; the handler refuses to proceed."""

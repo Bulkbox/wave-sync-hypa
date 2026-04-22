@@ -9,7 +9,7 @@ units (cents).
 """
 
 import frappe
-from frappe.utils import getdate
+from frappe.utils import escape_html, getdate
 
 from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_new
 from wave_sync_hypa.wave_sync_hypa.resolvers.customer_resolver import find_or_create_customer
@@ -36,8 +36,13 @@ def handle(payload: dict, correlation_id: str) -> None:
 
 	sales_order = _build_sales_order_header(settings, customer_name, shipping_address, payload, correlation_id)
 	_append_product_lines(sales_order, payload, correlation_id)
-	_append_fee_lines(sales_order, payload, settings, correlation_id)
+	skipped_fees = _append_fee_lines(sales_order, payload, settings)
 	_persist_sales_order(sales_order)
+
+	if skipped_fees:
+		_annotate_sales_order_for_skipped_fees(
+			sales_order.name, payload, correlation_id, skipped_fees
+		)
 
 	_log_sales_order_created(correlation_id, payload, sales_order.name)
 
@@ -143,21 +148,42 @@ def _append_product_lines(sales_order, payload: dict, correlation_id: str) -> No
 	_log_items_resolved(correlation_id, payload, len(sales_order.items))
 
 
-def _append_fee_lines(sales_order, payload: dict, settings, correlation_id: str) -> None:
-	"""Add one Sales Order item row per Wave fee; rate is computed from the fee amount in cents."""
+def _append_fee_lines(sales_order, payload: dict, settings) -> list[dict]:
+	"""Add one SO item row per resolvable Wave fee; return details of fees that could not be resolved.
+
+	Missing Fee Mappings are deliberately non-fatal here: the product lines are what
+	drive fulfilment, and aborting the entire order because accounting has not yet
+	added a mapping for a shipping fee would block the picker unnecessarily. Instead
+	we collect the failures and let the caller annotate the Sales Order after save.
+	"""
 	divisor = int(settings.price_scale_divisor or 100)
+	skipped: list[dict] = []
 	for fee in payload.get("fees") or []:
 		fee_type = fee.get("type")
-		item_code = resolve_fee(fee_type)
+		amount_cents = fee.get("amount")
+		amount_major = cents_to_major(amount_cents, divisor)
+		try:
+			item_code = resolve_fee(fee_type)
+		except WaveResolutionError as exc:
+			skipped.append(
+				{
+					"type": fee_type,
+					"amount_cents": amount_cents,
+					"amount_major": amount_major,
+					"error": str(exc),
+				}
+			)
+			continue
 		sales_order.append(
 			"items",
 			{
 				"item_code": item_code,
 				"qty": 1,
-				"rate": cents_to_major(fee.get("amount"), divisor),
+				"rate": amount_major,
 				"delivery_date": sales_order.delivery_date,
 			},
 		)
+	return skipped
 
 
 def _persist_sales_order(sales_order) -> None:
@@ -221,6 +247,112 @@ def _log_sales_order_created(correlation_id: str, payload: dict, sales_order_nam
 		friendly_id=payload.get("friendlyId"),
 		linked_doctype="Sales Order",
 		linked_docname=sales_order_name,
+	)
+
+
+def _annotate_sales_order_for_skipped_fees(
+	sales_order_name: str,
+	payload: dict,
+	correlation_id: str,
+	skipped: list[dict],
+) -> None:
+	"""Flag the SO for manual review, log each skipped fee, and attach a human-readable Comment."""
+	_flag_manual_review(sales_order_name)
+	_log_skipped_fees(correlation_id, payload, sales_order_name, skipped)
+	_add_skipped_fees_comment(sales_order_name, payload, correlation_id, skipped)
+
+
+def _flag_manual_review(sales_order_name: str) -> None:
+	"""Set wave_manual_review_required=1 via direct DB write so validate() does not re-run."""
+	frappe.db.set_value(
+		"Sales Order",
+		sales_order_name,
+		"wave_manual_review_required",
+		1,
+		update_modified=False,
+	)
+	frappe.db.commit()
+
+
+def _log_skipped_fees(
+	correlation_id: str,
+	payload: dict,
+	sales_order_name: str,
+	skipped: list[dict],
+) -> None:
+	"""Write one Action Required log row per skipped fee with the type, amount, and resolver error."""
+	for entry in skipped:
+		log_step(
+			correlation_id,
+			"Action Required",
+			"Warning",
+			doc_type="ORDER",
+			action="CREATE",
+			wave_id=payload.get("_id"),
+			wave_updated_at=payload.get("updatedAt"),
+			friendly_id=payload.get("friendlyId"),
+			linked_doctype="Sales Order",
+			linked_docname=sales_order_name,
+			error_message=(entry.get("error") or "")[:500],
+			response_body={
+				"wave_fee_type": entry.get("type"),
+				"amount_cents": entry.get("amount_cents"),
+				"amount_major": entry.get("amount_major"),
+				"resolution": (
+					"Add a row in Wave Settings > Rules > Fee Mappings for this fee type, "
+					"then add the fee line to this Sales Order manually."
+				),
+			},
+		)
+
+
+def _add_skipped_fees_comment(
+	sales_order_name: str,
+	payload: dict,
+	correlation_id: str,
+	skipped: list[dict],
+) -> None:
+	"""Attach a single descriptive Comment to the Sales Order enumerating every skipped fee."""
+	doc = frappe.get_doc("Sales Order", sales_order_name)
+	doc.add_comment("Comment", _build_skipped_fees_comment_html(payload, correlation_id, skipped))
+
+
+def _build_skipped_fees_comment_html(
+	payload: dict,
+	correlation_id: str,
+	skipped: list[dict],
+) -> str:
+	"""Render the Comment body listing each skipped fee and the fix steps."""
+	rows = "".join(_render_skipped_fee_row(entry) for entry in skipped)
+	return (
+		"<div><b>Wave Sync &mdash; manual review required.</b></div>"
+		f"<div>{len(skipped)} fee line(s) could not be added to this Sales Order because their "
+		"<i>Wave Fee Mapping</i> is missing or incomplete.</div>"
+		f"<ul>{rows}</ul>"
+		"<div><b>To resolve:</b></div>"
+		"<ol>"
+		"<li>Open <i>Wave Settings &rarr; Rules &rarr; Fee Mappings</i>.</li>"
+		"<li>Add or complete the mapping for each Wave fee type listed above.</li>"
+		"<li>Either add the missing fee line(s) to this Sales Order manually, "
+		"or cancel and re-trigger the ORDER webhook from Wave.</li>"
+		"<li>Clear the <i>Wave Manual Review Required</i> flag on this Sales Order.</li>"
+		"</ol>"
+		f"<div><b>Wave order:</b> {escape_html(payload.get('friendlyId') or '—')} "
+		f"(ID: {escape_html(payload.get('_id') or '—')})<br>"
+		f"<b>Correlation:</b> {escape_html(correlation_id)}</div>"
+	)
+
+
+def _render_skipped_fee_row(entry: dict) -> str:
+	"""Render one <li> describing a single skipped fee."""
+	return (
+		"<li><b>{fee_type}</b> "
+		"(amount: {amount_major:.2f}, cents: {amount_cents}): {error}</li>"
+	).format(
+		fee_type=escape_html(entry.get("type") or "(unknown)"),
+		amount_major=float(entry.get("amount_major") or 0.0),
+		amount_cents=escape_html(str(entry.get("amount_cents") or "—")),
+		error=escape_html(entry.get("error") or ""),
 	)
 
 
