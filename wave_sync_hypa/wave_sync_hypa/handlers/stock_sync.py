@@ -100,6 +100,7 @@ def _enqueue_push(item_code: str, sle_name: str, correlation_id: str) -> None:
 			enqueue_after_commit=True,
 			item_code=item_code,
 			correlation_id=correlation_id,
+			batch_id=None,
 		)
 	except Exception as exc:
 		log_step(
