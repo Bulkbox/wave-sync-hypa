@@ -1,10 +1,14 @@
 // Manual-review banner for Sales Orders drafted by the Wave Sync integration.
-// Shows a prominent orange intro whenever wave_manual_review_required is set,
-// and exposes a Clear Review Flag button that calls the backend acknowledge endpoint.
+// The banner + Clear Review Flag button render ONLY while the SO is in Draft
+// (docstatus === 0). Once the operator submits or cancels, they have made an
+// explicit decision about the order and the banner becomes noise — submitted
+// orders surface their state through the standard ERPNext lifecycle, not via
+// a leftover review flag from intake time.
 
 frappe.ui.form.on("Sales Order", {
 	refresh(frm) {
-		if (frm.doc.wave_manual_review_required) {
+		const is_draft = frm.doc.docstatus === 0;
+		if (is_draft && frm.doc.wave_manual_review_required) {
 			_render_manual_review_banner(frm);
 			_add_clear_review_button(frm);
 		}
