@@ -122,17 +122,19 @@
    "label": "ERP Link"
   },
   {
-   "description": "ERP DocType touched by this step, if any.",
+   "description": "ERP DocType touched by this step, if any. Link to DocType so the paired Linked Name field can render a Dynamic Link.",
    "fieldname": "linked_doctype",
-   "fieldtype": "Data",
+   "fieldtype": "Link",
    "label": "Linked DocType",
+   "options": "DocType",
    "read_only": 1
   },
   {
-   "description": "ERP document name touched by this step, if any.",
+   "description": "ERP document touched by this step, if any. Dynamic Link — clicking the value navigates straight to the underlying record (Sales Order, Item, Stock Ledger Entry, Customer, ...) using the DocType named in Linked DocType.",
    "fieldname": "linked_docname",
-   "fieldtype": "Data",
+   "fieldtype": "Dynamic Link",
    "label": "Linked Name",
+   "options": "linked_doctype",
    "read_only": 1
   },
   {
