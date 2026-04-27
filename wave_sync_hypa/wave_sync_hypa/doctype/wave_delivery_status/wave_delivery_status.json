@@ -1,0 +1,68 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:status_name",
+ "creation": "2026-04-27 00:00:00",
+ "description": "Canonical catalogue of Wave delivery sub-statuses, taken verbatim from Wave's API documentation. Outbound rule rows Link here so admins can pick a value without typos.",
+ "doctype": "DocType",
+ "document_type": "Other",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "status_name",
+  "enabled",
+  "description"
+ ],
+ "fields": [
+  {
+   "description": "Exact deliveryStatus string Wave accepts on PUT /admin/orders/{id}. Case-sensitive.",
+   "fieldname": "status_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Status Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "description": "Human-readable note explaining when this delivery status applies.",
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Description"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-04-27 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Wave Sync Hypa",
+ "name": "Wave Delivery Status",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "status_name",
+ "sort_order": "ASC",
+ "states": [],
+ "title_field": "status_name",
+ "track_changes": 1
+}

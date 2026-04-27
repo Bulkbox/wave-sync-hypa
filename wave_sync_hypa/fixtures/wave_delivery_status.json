@@ -1,0 +1,23 @@
+[
+ {
+  "doctype": "Wave Delivery Status",
+  "name": "LOADING",
+  "status_name": "LOADING",
+  "enabled": 1,
+  "description": "Wave docs: order is being loaded for delivery."
+ },
+ {
+  "doctype": "Wave Delivery Status",
+  "name": "OUT_FOR_DELIVERY",
+  "status_name": "OUT_FOR_DELIVERY",
+  "enabled": 1,
+  "description": "Wave docs: order has left the store and is en route to the customer."
+ },
+ {
+  "doctype": "Wave Delivery Status",
+  "name": "DELIVERED",
+  "status_name": "DELIVERED",
+  "enabled": 1,
+  "description": "Wave docs: order has been handed to the customer."
+ }
+]

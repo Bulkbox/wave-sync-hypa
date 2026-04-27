@@ -4,11 +4,13 @@
 
 frappe.ui.form.on("Sales Order", {
 	refresh(frm) {
-		if (!frm.doc.wave_manual_review_required) {
-			return;
+		if (frm.doc.wave_manual_review_required) {
+			_render_manual_review_banner(frm);
+			_add_clear_review_button(frm);
 		}
-		_render_manual_review_banner(frm);
-		_add_clear_review_button(frm);
+		if (!frm.is_new() && frm.doc.wave_order_id) {
+			_add_resync_status_button(frm);
+		}
 	},
 });
 
@@ -55,6 +57,46 @@ function _call_clear_endpoint(frm) {
 				indicator: "green",
 			});
 			frm.reload_doc();
+		},
+	});
+}
+
+// Attach the manual "Sync Order Status to Wave" button under the Wave group.
+// Visible only on saved Wave-sourced orders; backend re-derives the rule mapping
+// for the SO's current docstatus and enqueues a PUT.
+function _add_resync_status_button(frm) {
+	frm.add_custom_button(
+		__("Sync Order Status to Wave"),
+		() => _confirm_resync_status(frm),
+		__("Wave")
+	);
+}
+
+function _confirm_resync_status(frm) {
+	frappe.confirm(
+		__(
+			"Push the current Wave status mapping for order {0} to Wave? Only do this if you suspect Wave is out of sync.",
+			[frm.doc.name]
+		),
+		() => _call_resync_status_endpoint(frm)
+	);
+}
+
+function _call_resync_status_endpoint(frm) {
+	frappe.call({
+		method: "wave_sync_hypa.wave_sync_hypa.api.sales_order_status.resync_order_status",
+		args: { sales_order: frm.doc.name },
+		freeze: true,
+		freeze_message: __("Queueing Wave status push..."),
+		callback(r) {
+			if (!r.message?.ok) return;
+			frappe.show_alert({
+				message: __("Wave status push queued ({0}). Correlation: {1}", [
+					r.message.event,
+					r.message.correlation_id,
+				]),
+				indicator: "green",
+			});
 		},
 	});
 }

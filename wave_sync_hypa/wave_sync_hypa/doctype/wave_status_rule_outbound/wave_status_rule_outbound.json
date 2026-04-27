@@ -2,37 +2,21 @@
  "actions": [],
  "autoname": "autoincrement",
  "creation": "2026-04-21 00:00:00",
- "description": "Maps an ERP trigger to the Wave status this app should push via changeorderstatus.",
+ "description": "Maps an ERP lifecycle event to the Wave status / deliveryStatus fields pushed via PUT /admin/orders/{id}. Configured in Wave Settings.",
  "doctype": "DocType",
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "erp_trigger_key",
-  "wave_status",
   "enabled",
-  "notes"
+  "erp_doctype",
+  "erp_event",
+  "erp_condition_field",
+  "erp_condition_value",
+  "wave_status",
+  "wave_delivery_status",
+  "description"
  ],
  "fields": [
-  {
-   "columns": 3,
-   "description": "ERP lifecycle event that fires this outbound push.",
-   "fieldname": "erp_trigger_key",
-   "fieldtype": "Select",
-   "in_list_view": 1,
-   "label": "ERP Trigger",
-   "options": "sales_order_submitted\nsales_order_cancelled\npick_list_draft\npick_list_submitted\ndelivery_note_submitted\nsales_invoice_submitted\npayment_entry_submitted_partial\npayment_entry_submitted_full",
-   "reqd": 1
-  },
-  {
-   "columns": 2,
-   "description": "Status string sent to Wave's changeorderstatus endpoint. Chosen from the Wave Status catalogue.",
-   "fieldname": "wave_status",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Wave Status",
-   "options": "Wave Status",
-   "reqd": 1
-  },
   {
    "columns": 1,
    "default": "1",
@@ -42,18 +26,69 @@
    "label": "Enabled"
   },
   {
-   "columns": 4,
-   "description": "Optional human-readable reason, shown in the rules grid.",
-   "fieldname": "notes",
-   "fieldtype": "Small Text",
+   "columns": 2,
+   "description": "ERP DocType whose lifecycle event triggers this rule (Sales Order today; Pick List / Delivery Note / Sales Invoice / Payment Entry as later phases land).",
+   "fieldname": "erp_doctype",
+   "fieldtype": "Link",
    "in_list_view": 1,
-   "label": "Notes"
+   "label": "ERP DocType",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "columns": 1,
+   "description": "ERPNext lifecycle hook firing the rule. submit / cancel cover the canonical state changes; update_after_submit covers in-place transitions like delivery_status flipping to Delivered.",
+   "fieldname": "erp_event",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "ERP Event",
+   "options": "submit\ncancel\nupdate_after_submit",
+   "reqd": 1
+  },
+  {
+   "columns": 1,
+   "description": "Optional. When set, the rule only matches if doc.<field> equals the configured value. Used to discriminate update_after_submit transitions, e.g. delivery_status=Delivered.",
+   "fieldname": "erp_condition_field",
+   "fieldtype": "Data",
+   "label": "Condition Field"
+  },
+  {
+   "columns": 1,
+   "description": "Required when Condition Field is set. Compared with str(doc.<field>) for equality.",
+   "fieldname": "erp_condition_value",
+   "fieldtype": "Data",
+   "label": "Condition Value"
+  },
+  {
+   "columns": 1,
+   "description": "Optional. When set, the rule contributes status=<this> to the Wave PUT body. Pulled from the Wave Status catalogue so values stay aligned with Wave's API.",
+   "fieldname": "wave_status",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Wave Status",
+   "options": "Wave Status"
+  },
+  {
+   "columns": 1,
+   "description": "Optional. When set, the rule contributes deliveryStatus=<this> to the Wave PUT body. Pulled from the Wave Delivery Status catalogue.",
+   "fieldname": "wave_delivery_status",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Wave Delivery Status",
+   "options": "Wave Delivery Status"
+  },
+  {
+   "columns": 2,
+   "description": "Free-form note explaining what this rule expresses, shown in the rules grid.",
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
   }
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-04-21 00:00:00",
+ "modified": "2026-04-27 00:00:00",
  "modified_by": "Administrator",
  "module": "Wave Sync Hypa",
  "name": "Wave Status Rule Outbound",

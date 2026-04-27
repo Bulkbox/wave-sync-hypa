@@ -147,6 +147,10 @@ doc_events = {
 	"Stock Ledger Entry": {
 		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.stock_sync.on_sle_submit",
 	},
+	"Sales Order": {
+		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_submit",
+		"on_cancel": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_cancel",
+	},
 }
 
 # Scheduled Tasks
@@ -168,6 +172,7 @@ fixtures = [
 		"filters": [["name", "like", "%-wave_%"]],
 	},
 	"Wave Status",
+	"Wave Delivery Status",
 	"Wave Action",
 ]
 
