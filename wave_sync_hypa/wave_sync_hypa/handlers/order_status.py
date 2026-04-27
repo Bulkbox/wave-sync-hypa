@@ -89,14 +89,20 @@ def _dispatch(doc, event: str) -> None:
 
 
 def _enqueue_push(sales_order_name: str, event: str, payload: dict, correlation_id: str, wave_order_id: str) -> None:
-	"""Queue the worker job, baking the resolved payload into the kwargs."""
+	"""Queue the worker job, baking the resolved payload into the kwargs.
+
+	Note: the worker function expects `erp_event`, not `event`. `event` is a
+	reserved kwarg in frappe.enqueue's own signature (used for scheduled-job
+	semantics) and Frappe consumes it before forwarding to the worker. Pass
+	the value through as `erp_event` so it survives the call.
+	"""
 	try:
 		frappe.enqueue(
 			WORKER_DOTTED_PATH,
 			queue="default",
 			enqueue_after_commit=True,
 			sales_order_name=sales_order_name,
-			event=event,
+			erp_event=event,
 			payload=payload,
 			correlation_id=correlation_id,
 		)

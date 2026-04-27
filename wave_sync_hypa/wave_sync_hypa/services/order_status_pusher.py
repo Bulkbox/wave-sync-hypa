@@ -34,24 +34,47 @@ STEP_PUSH_ABORTED_NO_WAVE_ID = "order_status_push_aborted_no_wave_order_id"
 STEP_PUSH_ABORTED_EMPTY_PAYLOAD = "order_status_push_aborted_empty_payload"
 STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED = "order_status_push_delivery_status_unsupported"
 STEP_PUSH_UNEXPECTED_ERROR = "order_status_push_unexpected_error"
+STEP_WORKER_STARTED = "order_status_push_worker_started"
 
 
 def push_order_status(
 	sales_order_name: str,
-	event: str,
+	erp_event: str,
 	payload: dict,
 	correlation_id: str,
 ) -> None:
-	"""Job entry point: POST the resolved status transition to Wave for one SO; never raises."""
+	"""Job entry point: POST the resolved status transition to Wave for one SO; never raises.
+
+	The kwarg is `erp_event` not `event` because `event` is reserved by
+	frappe.enqueue's own signature (used for scheduled-job firing semantics).
+	When we pass `event=...` to frappe.enqueue, Frappe consumes it before
+	forwarding to this function, and the worker call dies with a missing-
+	positional-argument TypeError before even entering the function body —
+	which is below the try/except, so no _attempt log row is written, and
+	the failure surfaces only in the Error Log.
+
+	The first thing the function does is write _worker_started so any future
+	"function never enters" bug is visible in the audit trail without having
+	to grep Error Log.
+	"""
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_WORKER_STARTED,
+		level="Info",
+		doc_type="Sales Order",
+		action=erp_event,
+		linked_doctype="Sales Order",
+		linked_docname=sales_order_name,
+	)
 	try:
-		_push_inner(sales_order_name, event, payload, correlation_id)
+		_push_inner(sales_order_name, erp_event, payload, correlation_id)
 	except Exception as exc:
 		log_step(
 			correlation_id=correlation_id,
 			step=STEP_PUSH_UNEXPECTED_ERROR,
 			level="Error",
 			doc_type="Sales Order",
-			action=event,
+			action=erp_event,
 			linked_doctype="Sales Order",
 			linked_docname=sales_order_name,
 			error_message=f"unexpected exception in push_order_status: {exc}",
@@ -59,7 +82,7 @@ def push_order_status(
 		)
 
 
-def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id: str) -> None:
+def _push_inner(sales_order_name: str, erp_event: str, payload: dict, correlation_id: str) -> None:
 	"""Real work: validate config, resolve wave_order_id, POST status, log transitions."""
 	settings = frappe.get_cached_doc("Wave Settings")
 
@@ -69,7 +92,7 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 			step=STEP_PUSH_ABORTED_DISABLED,
 			level="Warning",
 			doc_type="Sales Order",
-			action=event,
+			action=erp_event,
 			linked_doctype="Sales Order",
 			linked_docname=sales_order_name,
 			error_message="outbound_order_status_sync_enabled is off; skipping push.",
@@ -83,7 +106,7 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 			step=STEP_PUSH_ABORTED_NO_WAVE_ID,
 			level="Warning",
 			doc_type="Sales Order",
-			action=event,
+			action=erp_event,
 			linked_doctype="Sales Order",
 			linked_docname=sales_order_name,
 			error_message="Sales Order has no wave_order_id at run time; cannot push.",
@@ -97,7 +120,7 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 			step=STEP_PUSH_ABORTED_MISSING_CONFIG,
 			level="Error",
 			doc_type="Sales Order",
-			action=event,
+			action=erp_event,
 			linked_doctype="Sales Order",
 			linked_docname=sales_order_name,
 			wave_id=wave_order_id,
@@ -105,7 +128,7 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 		)
 		return
 
-	_warn_if_delivery_status_present(payload, sales_order_name, event, correlation_id, wave_order_id)
+	_warn_if_delivery_status_present(payload, sales_order_name, erp_event, correlation_id, wave_order_id)
 
 	status_name = (payload or {}).get("status")
 	if not status_name:
@@ -115,7 +138,7 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 			step=STEP_PUSH_ABORTED_EMPTY_PAYLOAD,
 			level="Info",
 			doc_type="Sales Order",
-			action=event,
+			action=erp_event,
 			linked_doctype="Sales Order",
 			linked_docname=sales_order_name,
 			wave_id=wave_order_id,
@@ -124,12 +147,12 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 		)
 		return
 
-	_post_status(sales_order_name, event, correlation_id, wave_order_id, config, status_name)
+	_post_status(sales_order_name, erp_event, correlation_id, wave_order_id, config, status_name)
 
 
 def _post_status(
 	sales_order_name: str,
-	event: str,
+	erp_event: str,
 	correlation_id: str,
 	wave_order_id: str,
 	config: dict,
@@ -142,7 +165,7 @@ def _post_status(
 		step=STEP_PUSH_ATTEMPT,
 		level="Info",
 		doc_type="Sales Order",
-		action=event,
+		action=erp_event,
 		linked_doctype="Sales Order",
 		linked_docname=sales_order_name,
 		wave_id=wave_order_id,
@@ -168,7 +191,7 @@ def _post_status(
 			step=STEP_PUSH_FAILED,
 			level="Error",
 			doc_type="Sales Order",
-			action=event,
+			action=erp_event,
 			linked_doctype="Sales Order",
 			linked_docname=sales_order_name,
 			wave_id=wave_order_id,
@@ -183,7 +206,7 @@ def _post_status(
 		step=STEP_PUSH_SUCCESS,
 		level="Info",
 		doc_type="Sales Order",
-		action=event,
+		action=erp_event,
 		linked_doctype="Sales Order",
 		linked_docname=sales_order_name,
 		wave_id=wave_order_id,
@@ -195,7 +218,7 @@ def _post_status(
 def _warn_if_delivery_status_present(
 	payload: dict,
 	sales_order_name: str,
-	event: str,
+	erp_event: str,
 	correlation_id: str,
 	wave_order_id: str,
 ) -> None:
@@ -214,7 +237,7 @@ def _warn_if_delivery_status_present(
 		step=STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED,
 		level="Warning",
 		doc_type="Sales Order",
-		action=event,
+		action=erp_event,
 		linked_doctype="Sales Order",
 		linked_docname=sales_order_name,
 		wave_id=wave_order_id,

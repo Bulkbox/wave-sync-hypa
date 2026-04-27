@@ -42,11 +42,14 @@ def resync_order_status(sales_order: str) -> dict:
 		)
 
 	correlation_id = new_correlation_id()
+	# `event` is a reserved kwarg in frappe.enqueue (used for scheduled-job
+	# semantics) — Frappe consumes it before forwarding to the worker.
+	# Pass through as `erp_event` so the value reaches push_order_status.
 	frappe.enqueue(
 		WORKER_DOTTED_PATH,
 		queue="default",
 		sales_order_name=doc.name,
-		event=event,
+		erp_event=event,
 		payload=payload,
 		correlation_id=correlation_id,
 	)

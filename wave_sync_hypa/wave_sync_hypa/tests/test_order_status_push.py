@@ -189,7 +189,11 @@ class TestHandler(FrappeTestCase):
 		mock_enqueue.assert_called_once()
 		kwargs = mock_enqueue.call_args.kwargs
 		self.assertEqual(kwargs["sales_order_name"], DUMMY_SO)
-		self.assertEqual(kwargs["event"], "submit")
+		# Worker function expects `erp_event`, not `event` — `event` is a
+		# reserved kwarg in frappe.enqueue's signature and would be eaten
+		# before reaching the worker.
+		self.assertEqual(kwargs["erp_event"], "submit")
+		self.assertNotIn("event", kwargs)
 		self.assertEqual(kwargs["payload"], {"status": "ACCEPTED"})
 		self.assertTrue(kwargs["enqueue_after_commit"])
 		self.assertIn(
@@ -424,4 +428,6 @@ class TestResyncEndpoint(FrappeTestCase):
 		self.assertTrue(result["ok"])
 		self.assertEqual(result["event"], "cancel")
 		self.assertEqual(result["payload"], {"status": "CANCELLED"})
-		self.assertEqual(mock_enqueue.call_args.kwargs["event"], "cancel")
+		# Worker function expects erp_event, not event (frappe.enqueue eats event).
+		self.assertEqual(mock_enqueue.call_args.kwargs["erp_event"], "cancel")
+		self.assertNotIn("event", mock_enqueue.call_args.kwargs)
