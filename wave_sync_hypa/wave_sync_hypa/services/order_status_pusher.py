@@ -1,10 +1,20 @@
-"""Worker job: PUT a resolved status payload to Wave for one Sales Order.
+"""Worker job: POST a resolved status transition to Wave for one Sales Order.
 
-Mirrors the stock_pusher pattern: re-reads Wave Settings on every invocation
-(mid-queue kill-switch safety), validates outbound config, calls
-wave_client.put_order_update, and logs every transition. Top-level try/except
-wraps the body so an unexpected exception in one job never breaks the worker
-loop.
+Wave's status endpoint is path-keyed:
+
+    POST /api/v3/admin/orders/{order_id}/status/{status_name}
+
+There is no body, no query string, and no equivalent endpoint for
+deliveryStatus yet. The resolver may emit a payload carrying
+{"status": "...", "deliveryStatus": "..."} based on rule rows; this
+worker pushes the status component via the supported endpoint and logs
++ skips the deliveryStatus component until Wave provides its endpoint.
+
+Mirrors the stock_pusher pattern: re-reads Wave Settings on every
+invocation (mid-queue kill-switch safety), validates outbound config,
+calls wave_client.post_order_status, and logs every transition. Top-level
+try/except wraps the body so an unexpected exception in one job never
+breaks the worker loop.
 """
 
 from __future__ import annotations
@@ -21,6 +31,8 @@ STEP_PUSH_FAILED = "order_status_push_failed"
 STEP_PUSH_ABORTED_DISABLED = "order_status_push_aborted_settings_off"
 STEP_PUSH_ABORTED_MISSING_CONFIG = "order_status_push_aborted_missing_config"
 STEP_PUSH_ABORTED_NO_WAVE_ID = "order_status_push_aborted_no_wave_order_id"
+STEP_PUSH_ABORTED_EMPTY_PAYLOAD = "order_status_push_aborted_empty_payload"
+STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED = "order_status_push_delivery_status_unsupported"
 STEP_PUSH_UNEXPECTED_ERROR = "order_status_push_unexpected_error"
 
 
@@ -30,7 +42,7 @@ def push_order_status(
 	payload: dict,
 	correlation_id: str,
 ) -> None:
-	"""Job entry point: PUT the resolved status payload to Wave for one SO; never raises."""
+	"""Job entry point: POST the resolved status transition to Wave for one SO; never raises."""
 	try:
 		_push_inner(sales_order_name, event, payload, correlation_id)
 	except Exception as exc:
@@ -48,7 +60,7 @@ def push_order_status(
 
 
 def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id: str) -> None:
-	"""Real work: validate config, resolve wave_order_id, call Wave, log transitions."""
+	"""Real work: validate config, resolve wave_order_id, POST status, log transitions."""
 	settings = frappe.get_cached_doc("Wave Settings")
 
 	if not settings.get("outbound_order_status_sync_enabled"):
@@ -93,7 +105,38 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 		)
 		return
 
-	skip_webhook = bool(settings.get("outbound_skip_webhook_notification"))
+	_warn_if_delivery_status_present(payload, sales_order_name, event, correlation_id, wave_order_id)
+
+	status_name = (payload or {}).get("status")
+	if not status_name:
+		# After deliveryStatus-only rules are warned about, there's nothing supported left to push.
+		log_step(
+			correlation_id=correlation_id,
+			step=STEP_PUSH_ABORTED_EMPTY_PAYLOAD,
+			level="Info",
+			doc_type="Sales Order",
+			action=event,
+			linked_doctype="Sales Order",
+			linked_docname=sales_order_name,
+			wave_id=wave_order_id,
+			error_message="No supported field in resolved payload (status missing).",
+			request_body={"resolved_payload": payload},
+		)
+		return
+
+	_post_status(sales_order_name, event, correlation_id, wave_order_id, config, status_name)
+
+
+def _post_status(
+	sales_order_name: str,
+	event: str,
+	correlation_id: str,
+	wave_order_id: str,
+	config: dict,
+	status_name: str,
+) -> None:
+	"""Build the path-keyed POST and log attempt + outcome."""
+	url_path = f"/api/v3/admin/orders/{wave_order_id}/status/{status_name}"
 	log_step(
 		correlation_id=correlation_id,
 		step=STEP_PUSH_ATTEMPT,
@@ -104,20 +147,20 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 		linked_docname=sales_order_name,
 		wave_id=wave_order_id,
 		request_body={
+			"method": "POST",
+			"path": url_path,
 			"order_id": wave_order_id,
-			"body": payload,
-			"skip_webhook_notification": skip_webhook,
+			"status_name": status_name,
 		},
 	)
 
 	try:
-		response = wave_client.put_order_update(
+		response = wave_client.post_order_status(
 			base_url=config["base_url"],
 			api_key=config["api_key"],
 			app_id=config["app_id"],
 			order_id=wave_order_id,
-			body=payload,
-			skip_webhook_notification=skip_webhook,
+			status_name=status_name,
 		)
 	except WaveOutboundError as exc:
 		log_step(
@@ -129,7 +172,7 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 			linked_doctype="Sales Order",
 			linked_docname=sales_order_name,
 			wave_id=wave_order_id,
-			request_body={"order_id": wave_order_id, "body": payload},
+			request_body={"path": url_path, "status_name": status_name},
 			error_message=str(exc),
 			stack_trace=frappe.get_traceback(),
 		)
@@ -144,8 +187,42 @@ def _push_inner(sales_order_name: str, event: str, payload: dict, correlation_id
 		linked_doctype="Sales Order",
 		linked_docname=sales_order_name,
 		wave_id=wave_order_id,
-		request_body={"order_id": wave_order_id, "body": payload},
+		request_body={"path": url_path, "status_name": status_name},
 		response_body=response,
+	)
+
+
+def _warn_if_delivery_status_present(
+	payload: dict,
+	sales_order_name: str,
+	event: str,
+	correlation_id: str,
+	wave_order_id: str,
+) -> None:
+	"""Log a clear unsupported-channel warning when a rule sets wave_delivery_status.
+
+	Wave gave us only the path-keyed status endpoint. Until they provide the
+	equivalent for deliveryStatus, we cannot push delivery transitions, and
+	guessing a URL would 404 + clutter logs. This warning surfaces the gap
+	in the audit trail so ops know exactly what was configured but skipped.
+	"""
+	delivery_status = (payload or {}).get("deliveryStatus")
+	if not delivery_status:
+		return
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED,
+		level="Warning",
+		doc_type="Sales Order",
+		action=event,
+		linked_doctype="Sales Order",
+		linked_docname=sales_order_name,
+		wave_id=wave_order_id,
+		request_body={"requested_delivery_status": delivery_status},
+		error_message=(
+			"Wave does not yet provide an outbound endpoint for deliveryStatus. "
+			"Skipping that field; status transitions still pushed normally."
+		),
 	)
 
 

@@ -21,7 +21,6 @@
   "wave_api_key",
   "outbound_stock_sync_enabled",
   "outbound_order_status_sync_enabled",
-  "outbound_skip_webhook_notification",
   "erp_defaults_section",
   "default_company",
   "default_warehouse",
@@ -132,13 +131,6 @@
    "fieldname": "outbound_order_status_sync_enabled",
    "fieldtype": "Check",
    "label": "Outbound Order Status Sync Enabled"
-  },
-  {
-   "default": "1",
-   "description": "When on (recommended), every outbound PUT to /admin/orders/{id} carries skipWebhookNotification=true so Wave does not bounce the change back to us as ORDER.UPDATE — that would loop ERP -> Wave -> ERP indefinitely. Turn off only if you intentionally want Wave to re-broadcast our pushes (rare, advanced use).",
-   "fieldname": "outbound_skip_webhook_notification",
-   "fieldtype": "Check",
-   "label": "Skip Webhook Notification on Outbound"
   },
   {
    "fieldname": "erp_defaults_section",

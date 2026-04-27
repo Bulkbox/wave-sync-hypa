@@ -35,13 +35,11 @@ def _stub_settings(
 	*,
 	enabled: bool = True,
 	rules: list | None = None,
-	skip_webhook_notification: bool = True,
 ) -> MagicMock:
 	"""Return a settings stand-in with the fields the resolver / handler / worker read."""
 	settings = MagicMock(name="WaveSettings")
 	values = {
 		"outbound_order_status_sync_enabled": 1 if enabled else 0,
-		"outbound_skip_webhook_notification": 1 if skip_webhook_notification else 0,
 		"wave_api_base_url": DUMMY_BASE_URL,
 		"wave_app_id": DUMMY_APP_ID,
 		"outbound_status_rules": rules or [],
@@ -208,33 +206,20 @@ class TestWorker(FrappeTestCase):
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
 			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
-			patch.object(order_status_pusher.wave_client, "put_order_update", return_value={"ok": True}) as mock_put,
+			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={"ok": True}) as mock_post,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
 			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-1")
-		mock_put.assert_called_once_with(
+		mock_post.assert_called_once_with(
 			base_url=DUMMY_BASE_URL,
 			api_key=DUMMY_API_KEY,
 			app_id=DUMMY_APP_ID,
 			order_id=DUMMY_WAVE_ORDER_ID,
-			body={"status": "ACCEPTED"},
-			skip_webhook_notification=True,
+			status_name="ACCEPTED",
 		)
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(order_status_pusher.STEP_PUSH_ATTEMPT, steps)
 		self.assertIn(order_status_pusher.STEP_PUSH_SUCCESS, steps)
-
-	def test_passes_skip_webhook_flag_off_when_setting_disabled(self):
-		"""When operator turns the setting off, worker forwards skip_webhook_notification=False."""
-		settings = _stub_settings(skip_webhook_notification=False)
-		with (
-			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
-			patch.object(order_status_pusher.wave_client, "put_order_update", return_value={}) as mock_put,
-			patch.object(order_status_pusher, "log_step"),
-		):
-			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-flag-off")
-		self.assertFalse(mock_put.call_args.kwargs["skip_webhook_notification"])
 
 	def test_logs_failed_on_outbound_error_and_swallows(self):
 		settings = _stub_settings()
@@ -243,7 +228,7 @@ class TestWorker(FrappeTestCase):
 			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
 			patch.object(
 				order_status_pusher.wave_client,
-				"put_order_update",
+				"post_order_status",
 				side_effect=WaveOutboundError("HTTP 400: bad status"),
 			),
 			patch.object(order_status_pusher, "log_step") as mock_log,
@@ -257,11 +242,11 @@ class TestWorker(FrappeTestCase):
 		settings = _stub_settings(enabled=False)
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(order_status_pusher.wave_client, "put_order_update") as mock_put,
+			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_post,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
 			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-3")
-		mock_put.assert_not_called()
+		mock_post.assert_not_called()
 		self.assertIn(
 			order_status_pusher.STEP_PUSH_ABORTED_DISABLED,
 			[c.kwargs.get("step") for c in mock_log.call_args_list],
@@ -272,11 +257,11 @@ class TestWorker(FrappeTestCase):
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
 			patch.object(frappe.db, "get_value", return_value=None),
-			patch.object(order_status_pusher.wave_client, "put_order_update") as mock_put,
+			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_post,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
 			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-4")
-		mock_put.assert_not_called()
+		mock_post.assert_not_called()
 		self.assertIn(
 			order_status_pusher.STEP_PUSH_ABORTED_NO_WAVE_ID,
 			[c.kwargs.get("step") for c in mock_log.call_args_list],
@@ -294,75 +279,99 @@ class TestWorker(FrappeTestCase):
 			[c.kwargs.get("step") for c in mock_log.call_args_list],
 		)
 
+	def test_logs_unsupported_warning_when_payload_carries_only_delivery_status(self):
+		"""A rule that sets only wave_delivery_status produces a warning + no HTTP call."""
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
+			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_post,
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			order_status_pusher.push_order_status(
+				DUMMY_SO, "submit", {"deliveryStatus": "OUT_FOR_DELIVERY"}, "corr-ds-only"
+			)
+		mock_post.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED, steps)
+		self.assertIn(order_status_pusher.STEP_PUSH_ABORTED_EMPTY_PAYLOAD, steps)
 
-class TestWaveClientPutOrderUpdate(FrappeTestCase):
-	"""HTTP-shape tests for the new put_order_update wrapper."""
+	def test_pushes_status_and_warns_when_payload_carries_both(self):
+		"""Status + deliveryStatus rule: status is pushed; deliveryStatus emits an unsupported warning."""
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
+			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={}) as mock_post,
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			order_status_pusher.push_order_status(
+				DUMMY_SO,
+				"submit",
+				{"status": "UNDER_DELIVERY", "deliveryStatus": "OUT_FOR_DELIVERY"},
+				"corr-both",
+			)
+		# Status pushed via the path-keyed endpoint.
+		mock_post.assert_called_once()
+		self.assertEqual(mock_post.call_args.kwargs["status_name"], "UNDER_DELIVERY")
+		# Warning emitted for the deliveryStatus side.
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED, steps)
+		self.assertIn(order_status_pusher.STEP_PUSH_SUCCESS, steps)
 
-	def test_url_carries_skip_webhook_true_by_default(self):
+
+class TestWaveClientPostOrderStatus(FrappeTestCase):
+	"""HTTP-shape tests for post_order_status (path-keyed POST, no body)."""
+
+	def test_url_path_carries_status_name(self):
 		fake_response = MagicMock(status_code=200, content=b'{"ok":true}')
 		fake_response.json.return_value = {"ok": True}
-		with patch.object(requests, "put", return_value=fake_response) as mock_put:
-			result = wave_client.put_order_update(
+		with patch.object(requests, "post", return_value=fake_response) as mock_post:
+			result = wave_client.post_order_status(
 				base_url=DUMMY_BASE_URL,
 				api_key=DUMMY_API_KEY,
 				app_id=DUMMY_APP_ID,
 				order_id=DUMMY_WAVE_ORDER_ID,
-				body={"status": "ACCEPTED"},
+				status_name="ACCEPTED",
 			)
 		self.assertEqual(result, {"ok": True})
-		args, kwargs = mock_put.call_args
+		args, kwargs = mock_post.call_args
 		self.assertEqual(
 			args[0],
-			f"{DUMMY_BASE_URL}/api/v3/admin/orders/{DUMMY_WAVE_ORDER_ID}?skipWebhookNotification=true",
+			f"{DUMMY_BASE_URL}/api/v3/admin/orders/{DUMMY_WAVE_ORDER_ID}/status/ACCEPTED",
 		)
 		self.assertEqual(kwargs["headers"]["X-API-Key"], DUMMY_API_KEY)
 		self.assertEqual(kwargs["headers"]["appId"], DUMMY_APP_ID)
-		self.assertEqual(kwargs["json"], {"status": "ACCEPTED"})
-
-	def test_url_carries_skip_webhook_false_when_caller_opts_out(self):
-		"""skip_webhook_notification=False renders ?skipWebhookNotification=false in the URL."""
-		fake_response = MagicMock(status_code=200, content=b"{}")
-		fake_response.json.return_value = {}
-		with patch.object(requests, "put", return_value=fake_response) as mock_put:
-			wave_client.put_order_update(
-				base_url=DUMMY_BASE_URL,
-				api_key=DUMMY_API_KEY,
-				app_id=DUMMY_APP_ID,
-				order_id=DUMMY_WAVE_ORDER_ID,
-				body={"status": "ACCEPTED"},
-				skip_webhook_notification=False,
-			)
-		self.assertEqual(
-			mock_put.call_args.args[0],
-			f"{DUMMY_BASE_URL}/api/v3/admin/orders/{DUMMY_WAVE_ORDER_ID}?skipWebhookNotification=false",
-		)
+		# No body, no content-type header on this endpoint.
+		self.assertNotIn("json", kwargs)
+		self.assertNotIn("content-type", kwargs["headers"])
 
 	def test_non_2xx_raises_outbound_error(self):
 		fake_response = MagicMock(status_code=400)
 		fake_response.text = "bad request"
 		fake_response.content = b"bad request"
-		with patch.object(requests, "put", return_value=fake_response):
+		with patch.object(requests, "post", return_value=fake_response):
 			with self.assertRaises(WaveOutboundError) as ctx:
-				wave_client.put_order_update(
+				wave_client.post_order_status(
 					base_url=DUMMY_BASE_URL,
 					api_key=DUMMY_API_KEY,
 					app_id=DUMMY_APP_ID,
 					order_id=DUMMY_WAVE_ORDER_ID,
-					body={"status": "WHATEVER"},
+					status_name="WHATEVER",
 				)
 		self.assertIn("HTTP 400", str(ctx.exception))
 
-	def test_empty_body_is_rejected_before_http(self):
-		with patch.object(requests, "put") as mock_put:
+	def test_empty_status_name_is_rejected_before_http(self):
+		with patch.object(requests, "post") as mock_post:
 			with self.assertRaises(WaveOutboundError):
-				wave_client.put_order_update(
+				wave_client.post_order_status(
 					base_url=DUMMY_BASE_URL,
 					api_key=DUMMY_API_KEY,
 					app_id=DUMMY_APP_ID,
 					order_id=DUMMY_WAVE_ORDER_ID,
-					body={},
+					status_name="",
 				)
-		mock_put.assert_not_called()
+		mock_post.assert_not_called()
 
 
 class TestResyncEndpoint(FrappeTestCase):
