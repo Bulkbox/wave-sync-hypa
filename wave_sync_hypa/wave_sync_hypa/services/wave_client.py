@@ -54,17 +54,27 @@ def post_stock_sync(
 	return _parse_json(response)
 
 
-def put_order_update(
+def post_order_status(
 	*,
 	base_url: str,
 	api_key: str,
 	app_id: str,
 	order_id: str,
-	body: dict,
-	skip_webhook_notification: bool = True,
+	status_name: str,
 	timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict:
-	"""PUT a partial order update to Wave; skipWebhookNotification flag controlled by caller."""
+	"""POST a status transition for one order to Wave; status name lives in the URL path, no body.
+
+	Per Wave's spec:
+	    POST /api/v3/admin/orders/{order_id}/status/{status_name}
+	    Headers: X-API-Key, appId
+	    No body, no query string.
+
+	The endpoint is path-keyed (one URL per status), so callers fire one HTTP
+	call per status string they want to set. There is no batch / merged-body
+	form on Wave's side — that's why the resolver still emits a payload but
+	the worker translates each field into its own POST.
+	"""
 	if not base_url:
 		raise WaveOutboundError("Wave API base URL is not configured.")
 	if not api_key:
@@ -73,20 +83,20 @@ def put_order_update(
 		raise WaveOutboundError("Wave App ID is not configured.")
 	if not order_id:
 		raise WaveOutboundError("order_id is required.")
-	if not body:
-		raise WaveOutboundError("body must contain at least one field to update.")
+	if not status_name:
+		raise WaveOutboundError("status_name is required.")
 
-	url = _build_order_update_url(base_url, order_id, skip_webhook_notification)
-	headers = _build_headers(api_key, app_id)
+	url = _build_order_status_url(base_url, order_id, status_name)
+	headers = _build_status_headers(api_key, app_id)
 
 	try:
-		response = requests.put(url, json=body, headers=headers, timeout=timeout)
+		response = requests.post(url, headers=headers, timeout=timeout)
 	except requests.RequestException as exc:
-		raise WaveOutboundError(f"network error calling Wave order update: {exc}") from exc
+		raise WaveOutboundError(f"network error calling Wave order status: {exc}") from exc
 
 	if not (200 <= response.status_code < 300):
 		raise WaveOutboundError(
-			f"Wave order update returned HTTP {response.status_code}: {_safe_text(response)}"
+			f"Wave order status returned HTTP {response.status_code}: {_safe_text(response)}"
 		)
 
 	return _parse_json(response)
@@ -97,22 +107,27 @@ def _build_stock_sync_url(base_url: str, product_id: str) -> str:
 	return f"{base_url.rstrip('/')}/api/v3/admin/products/{product_id}/stock/sync"
 
 
-def _build_order_update_url(base_url: str, order_id: str, skip_webhook_notification: bool) -> str:
-	"""Compose the per-order update URL; query string carries the skip flag verbatim per Wave's spec."""
-	flag = "true" if skip_webhook_notification else "false"
-	return (
-		f"{base_url.rstrip('/')}/api/v3/admin/orders/{order_id}"
-		f"?skipWebhookNotification={flag}"
-	)
+def _build_order_status_url(base_url: str, order_id: str, status_name: str) -> str:
+	"""Compose the path-keyed order-status URL per Wave's spec."""
+	return f"{base_url.rstrip('/')}/api/v3/admin/orders/{order_id}/status/{status_name}"
 
 
 def _build_headers(api_key: str, app_id: str) -> dict:
-	"""Assemble the standard Wave request headers."""
+	"""Assemble request headers for endpoints that send a JSON body."""
 	return {
 		"X-API-Key": api_key,
 		"appId": app_id,
 		"accept": "application/json",
 		"content-type": "application/json",
+	}
+
+
+def _build_status_headers(api_key: str, app_id: str) -> dict:
+	"""Headers for the status endpoint — no body, so omit content-type."""
+	return {
+		"X-API-Key": api_key,
+		"appId": app_id,
+		"accept": "application/json",
 	}
 
 

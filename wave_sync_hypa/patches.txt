@@ -4,3 +4,4 @@
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
+wave_sync_hypa.wave_sync_hypa.patches.v1_0.relax_wave_order_id_uniqueness

@@ -148,6 +148,7 @@ doc_events = {
 		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.stock_sync.on_sle_submit",
 	},
 	"Sales Order": {
+		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.sales_order_validation.validate_unique_wave_order_id",
 		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_submit",
 		"on_cancel": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_cancel",
 	},
