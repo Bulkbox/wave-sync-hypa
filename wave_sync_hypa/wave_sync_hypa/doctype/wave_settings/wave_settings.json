@@ -15,8 +15,11 @@
   "inbound_api_key",
   "outbound_section",
   "wave_api_base_url",
+  "wave_app_id",
+  "wave_store_id",
   "column_break_outbound",
   "wave_api_key",
+  "outbound_stock_sync_enabled",
   "erp_defaults_section",
   "default_company",
   "default_warehouse",
@@ -92,14 +95,34 @@
    "options": "URL"
   },
   {
+   "description": "Sent as the appId HTTP header on every outbound call. Provided by Wave when the app is registered.",
+   "fieldname": "wave_app_id",
+   "fieldtype": "Data",
+   "label": "Wave App ID"
+  },
+  {
+   "default": "1",
+   "description": "Identifier of the Wave store this ERP instance mirrors. Single-shop deployments leave this as 1; sent in the JSON body of stock-sync calls.",
+   "fieldname": "wave_store_id",
+   "fieldtype": "Data",
+   "label": "Wave Store ID"
+  },
+  {
    "fieldname": "column_break_outbound",
    "fieldtype": "Column Break"
   },
   {
-   "description": "API key sent on every outbound call to Wave. Stored encrypted.",
+   "description": "API key sent on every outbound call to Wave (X-API-Key header). Stored encrypted.",
    "fieldname": "wave_api_key",
    "fieldtype": "Password",
    "label": "Wave API Key"
+  },
+  {
+   "default": "1",
+   "description": "Master kill-switch for outbound stock pushes. When off, ERP stock movements are still logged but no HTTP call is made to Wave. Use this to mute traffic during cutovers without disabling the inbound integration.",
+   "fieldname": "outbound_stock_sync_enabled",
+   "fieldtype": "Check",
+   "label": "Outbound Stock Sync Enabled"
   },
   {
    "fieldname": "erp_defaults_section",
