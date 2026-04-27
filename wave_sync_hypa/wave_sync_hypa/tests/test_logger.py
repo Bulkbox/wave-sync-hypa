@@ -66,3 +66,21 @@ class TestLogStep(FrappeTestCase):
 		)
 		self.assertEqual(row.error_message, "Customer not found")
 		self.assertEqual(row.stack_trace, "Traceback: ...")
+
+	def test_pipeline_specific_step_tag_persists(self):
+		"""Free-form snake_case step tags (used by stock-sync, order-status, etc.) must round-trip.
+
+		Regression cover: when this field was a Select limited to 13 canonical
+		options, every stock_sync_* / order_status_push_* row was rejected by
+		validation and silently swallowed by log_step's try/except — telemetry
+		loss for ~a month before anyone noticed. Asserting persistence here
+		means a future tightening of the field type would fail this test
+		instead of the production pipeline.
+		"""
+		log_step(self.correlation_id, "stock_sync_push_attempt", "Info", linked_doctype="Item")
+		step = frappe.db.get_value(
+			"Wave Sync Log",
+			{"correlation_id": self.correlation_id},
+			"step",
+		)
+		self.assertEqual(step, "stock_sync_push_attempt")
