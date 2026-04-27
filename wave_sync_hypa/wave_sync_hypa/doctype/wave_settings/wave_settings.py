@@ -42,23 +42,37 @@ class WaveSettings(Document):
 	"""
 
 	def before_save(self):
-		"""Restore Password fields the form did not actually change so __Auth is not wiped.
+		"""Restore Password fields and child-table rows that the in-memory doc has dropped.
 
-		Root cause of the data-loss reports: Frappe's save pipeline treats an
-		in-memory Password field of None / "" as "operator cleared the secret"
-		and DELETEs the encrypted row from __Auth. Browsers, child-table inline
-		edits, and partial form posts routinely send the field as None, even
-		when the operator never touched it. Without this guard, every such
-		save silently wipes the inbound key (and downstream the outbound key,
-		since both are Password fields).
+		Two distinct preservation passes, both addressing the same Frappe
+		footgun: the save pipeline treats whatever's in-memory as the new
+		ground truth and wipes anything missing.
 
-		Fix: when the in-memory value is empty / None / fully masked AND the
-		encrypted store still has a value, copy the cleartext back into the
-		in-memory field. Frappe then re-encrypts the same value on save, sees
-		"no change", and __Auth survives untouched.
+		1. Password fields. Browsers / partial form posts routinely send
+		   inbound_api_key as None / "" even when the operator never touched
+		   it. Without a guard, save would DELETE the row from __Auth.
+		   Fix: when the in-memory value is empty / None / fully masked AND
+		   the encrypted store still has a value, copy the cleartext back
+		   in. Frappe re-encrypts the same value, sees no change, __Auth
+		   survives.
+
+		2. Child tables. The migrate / install / patch / fixtures pipelines
+		   sometimes load Wave Settings with the child-table attributes
+		   empty (operator never opened the doc; framework just calls save
+		   to re-apply schema defaults). Frappe then DELETEs all child rows
+		   for those tables because the in-memory list is empty. The audit
+		   trail confirmed exactly this: 26 saves in 1s during one migrate,
+		   route_rules went from 1 → 0 between consecutive saves.
+		   Fix: ONLY during framework-driven saves, when an in-memory child
+		   table is empty but the DB has rows, repopulate from DB. A real
+		   operator UI save with empty children is honored as-is — they
+		   meant to clear the table.
 		"""
 		for field in PASSWORD_FIELDS:
 			self._preserve_password_if_unchanged(field)
+		if self._is_framework_driven_save():
+			for field in CHILD_TABLE_FIELDS:
+				self._preserve_child_table_if_unchanged(field)
 
 	def validate(self):
 		"""Run invariants — but skip entirely when Frappe is the one driving the save."""
@@ -97,6 +111,31 @@ class WaveSettings(Document):
 		if stored:
 			# Restore the stored cleartext so Frappe's save pipeline sees no change to __Auth.
 			self.set(fieldname, stored)
+
+	def _preserve_child_table_if_unchanged(self, tablefield: str) -> None:
+		"""Repopulate an in-memory child table from DB when it's empty but the DB has rows.
+
+		Called only on framework-driven saves (in_install / in_migrate /
+		in_patch / in_fixtures). For UI saves we trust the operator's intent
+		even if they cleared a table. Without this guard, a migrate-time
+		save where Frappe didn't fully load the doc wipes every rule the
+		operator configured.
+		"""
+		current = self.get(tablefield) or []
+		if current:
+			return
+		child_doctype = self.meta.get_field(tablefield).options
+		stored_rows = frappe.get_all(
+			child_doctype,
+			filters={"parent": self.name, "parenttype": self.doctype, "parentfield": tablefield},
+			fields=["name"],
+			order_by="idx asc",
+		)
+		if not stored_rows:
+			return
+		for row in stored_rows:
+			existing = frappe.get_doc(child_doctype, row.name)
+			self.append(tablefield, existing.as_dict())
 
 	def _is_framework_driven_save(self) -> bool:
 		"""Return True when the save originates from install / migrate / patch hooks."""

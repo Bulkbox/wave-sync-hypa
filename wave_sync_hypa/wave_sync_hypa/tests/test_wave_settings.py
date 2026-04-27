@@ -184,6 +184,75 @@ class TestWaveSettings(FrappeTestCase):
 		settings.inbound_api_key = "E" * 32
 		settings.save(ignore_permissions=True)
 
+	def test_framework_driven_save_preserves_existing_child_rows(self):
+		"""During in_migrate, an empty in-memory child table must NOT wipe DB rows.
+
+		Regression cover for the route-rules-disappear-on-migrate report:
+		bench migrate triggered Wave Settings saves with empty in-memory
+		route_rules and Frappe's save pipeline DELETEd every row. The
+		audit trail caught it but the data was gone. This test pins the
+		before_save guard that repopulates the in-memory table from DB
+		whenever a framework-driven save lands without children loaded.
+		"""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "G" * 32
+		self.settings.append("route_rules", {
+			"enabled": 1,
+			"doc_type": "ORDER",
+			"action": "CREATE",
+			"handler_key": "order_create",
+		})
+		self.settings.flags.ignore_links = True
+		self.settings.save(ignore_permissions=True)
+
+		seeded = frappe.db.count(
+			"Wave Route Rule",
+			filters={"parent": "Wave Settings", "parenttype": "Wave Settings"},
+		)
+		self.assertEqual(seeded, 1)
+
+		# Simulate the migrate-time save: load fresh, drop the child rows
+		# from in-memory state, flip in_migrate, save. Without the guard
+		# the DB rows would be DELETEd.
+		reloaded = frappe.get_single("Wave Settings")
+		reloaded.route_rules = []
+
+		original = frappe.flags.in_migrate
+		frappe.flags.in_migrate = True
+		try:
+			reloaded.save(ignore_permissions=True)
+		finally:
+			frappe.flags.in_migrate = original
+
+		surviving = frappe.db.count(
+			"Wave Route Rule",
+			filters={"parent": "Wave Settings", "parenttype": "Wave Settings"},
+		)
+		self.assertEqual(surviving, 1)
+
+	def test_ui_save_with_cleared_child_table_honours_operator_intent(self):
+		"""A real UI save (no in_migrate flag) with empty children must wipe the rows — operator intent."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "H" * 32
+		self.settings.append("route_rules", {
+			"enabled": 1,
+			"doc_type": "ORDER",
+			"action": "UPDATE",
+			"handler_key": "order_update",
+		})
+		self.settings.flags.ignore_links = True
+		self.settings.save(ignore_permissions=True)
+
+		reloaded = frappe.get_single("Wave Settings")
+		reloaded.route_rules = []
+		reloaded.save(ignore_permissions=True)
+
+		surviving = frappe.db.count(
+			"Wave Route Rule",
+			filters={"parent": "Wave Settings", "parenttype": "Wave Settings"},
+		)
+		self.assertEqual(surviving, 0)
+
 	def test_post_save_audit_row_records_child_table_counts(self):
 		"""Every Wave Settings save writes one Wave Sync Log row with the child-table head count.
 
