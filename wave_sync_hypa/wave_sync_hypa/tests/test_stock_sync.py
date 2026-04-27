@@ -195,6 +195,33 @@ class TestStockPusherWorker(FrappeTestCase):
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(stock_pusher.STEP_PUSH_ABORTED_DISABLED, steps)
 
+	def test_push_stamps_batch_id_into_friendly_id(self):
+		"""When called with batch_id, every log row carries it as friendly_id for batch-filtering."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
+			patch.object(frappe.db, "get_value", return_value=7.0),
+			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={}),
+			patch.object(stock_pusher, "log_step") as mock_log,
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-batch", batch_id="batch-xyz")
+
+		friendly_ids = [c.kwargs.get("friendly_id") for c in mock_log.call_args_list]
+		self.assertTrue(friendly_ids)
+		self.assertTrue(all(fid == "batch-xyz" for fid in friendly_ids))
+
+	def test_push_swallows_unexpected_exception_and_logs_it(self):
+		"""A non-WaveOutboundError raised mid-flight is caught + logged; never propagates."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
+			patch.object(frappe.db, "get_value", side_effect=RuntimeError("db gone")),
+			patch.object(stock_pusher, "log_step") as mock_log,
+		):
+			# Must not raise.
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-boom")
+
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(stock_pusher.STEP_PUSH_UNEXPECTED_ERROR, steps)
+
 	def test_push_aborts_on_missing_outbound_config(self):
 		"""Empty wave_app_id (or any required outbound field) blocks the call with a clean log."""
 		settings = _stub_settings()
