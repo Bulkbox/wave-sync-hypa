@@ -139,13 +139,11 @@ doctype_js = {
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+	"Stock Ledger Entry": {
+		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.stock_sync.on_sle_submit",
+	},
+}
 
 # Scheduled Tasks
 # ---------------
