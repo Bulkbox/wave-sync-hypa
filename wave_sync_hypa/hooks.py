@@ -201,6 +201,13 @@ fixtures = [
 
 # Ignore links to specified DocTypes when deleting documents
 # -----------------------------------------------------------
+# Wave Sync Log is an append-only audit trail; its Dynamic Link to the touched
+# ERP record (Sales Order, Item, Customer, ...) makes the value clickable in
+# the Desk, but it must NOT prevent deletion of those records. Without this
+# hook, deleting any doc the integration has ever logged against would throw
+# LinkExistsError. Log rows survive deletion and keep their linked_docname;
+# clicking an orphaned link in the Desk simply 404s, which is the right
+# behaviour for an audit trail of historical state.
 # Wave Sync Log is an append-only audit trail; it must never gate deletion
 # of the records it references (Sales Order, Item, Customer, ...). Without
 # this, deleting any doc the integration has ever logged against would
