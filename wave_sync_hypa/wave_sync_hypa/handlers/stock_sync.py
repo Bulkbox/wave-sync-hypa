@@ -90,12 +90,12 @@ def on_sle_submit(doc, method=None) -> None:
 
 def _enqueue_push(item_code: str, sle_name: str, correlation_id: str) -> None:
 	"""Queue a deduplicated stock-push job for one item; log success or enqueue failure."""
-	job_name = f"wave-sync:stock:{item_code}"
+	job_id = f"wave-sync:stock:{item_code}"
 	try:
 		frappe.enqueue(
 			WORKER_DOTTED_PATH,
 			queue="default",
-			job_name=job_name,
+			job_id=job_id,
 			deduplicate=True,
 			enqueue_after_commit=True,
 			item_code=item_code,
@@ -122,5 +122,5 @@ def _enqueue_push(item_code: str, sle_name: str, correlation_id: str) -> None:
 		doc_type="Item",
 		linked_doctype="Item",
 		linked_docname=item_code,
-		request_body={"job_name": job_name, "triggered_by_sle": sle_name},
+		request_body={"job_id": job_id, "triggered_by_sle": sle_name},
 	)

@@ -112,7 +112,7 @@ def _try_enqueue_one(item_code: str, batch_id: str) -> bool:
 		frappe.enqueue(
 			PUSH_WORKER_DOTTED_PATH,
 			queue="default",
-			job_name=f"wave-sync:stock:{item_code}",
+			job_id=f"wave-sync:stock:{item_code}",
 			deduplicate=True,
 			item_code=item_code,
 			correlation_id=correlation_id,
