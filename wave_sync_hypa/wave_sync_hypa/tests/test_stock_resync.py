@@ -66,7 +66,7 @@ class TestStartFullResyncEndpoint(FrappeTestCase):
 		self.assertTrue(result["batch_id"])
 		mock_enqueue.assert_called_once()
 		_, kwargs = mock_enqueue.call_args
-		self.assertEqual(kwargs["job_name"], stock_resync.RESYNC_JOB_NAME)
+		self.assertEqual(kwargs["job_id"], stock_resync.RESYNC_JOB_NAME)
 		self.assertIsNone(kwargs["item_codes"])
 
 	def test_explicit_mode_passes_cleaned_list_to_coordinator(self):
@@ -137,7 +137,7 @@ class TestResyncCoordinator(FrappeTestCase):
 		self.assertEqual(mock_enqueue.call_count, 3)
 		for call in mock_enqueue.call_args_list:
 			self.assertEqual(call.kwargs["batch_id"], "batch-A")
-			self.assertTrue(call.kwargs["job_name"].startswith("wave-sync:stock:"))
+			self.assertTrue(call.kwargs["job_id"].startswith("wave-sync:stock:"))
 			self.assertTrue(call.kwargs["deduplicate"])
 
 	def test_logs_started_and_completed_with_counters(self):

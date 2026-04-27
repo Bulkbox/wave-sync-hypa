@@ -97,7 +97,7 @@ def _enqueue_coordinator(batch_id: str, codes: list[str] | None) -> None:
 	frappe.enqueue(
 		"wave_sync_hypa.wave_sync_hypa.services.stock_resync.enqueue_full_resync_jobs",
 		queue="long",
-		job_name=stock_resync.RESYNC_JOB_NAME,
+		job_id=stock_resync.RESYNC_JOB_NAME,
 		deduplicate=True,
 		batch_id=batch_id,
 		item_codes=codes,

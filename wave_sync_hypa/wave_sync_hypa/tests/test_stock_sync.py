@@ -66,7 +66,7 @@ class TestSleSubmitHandler(FrappeTestCase):
 
 		mock_enqueue.assert_called_once()
 		_, kwargs = mock_enqueue.call_args
-		self.assertEqual(kwargs["job_name"], f"wave-sync:stock:{DUMMY_ITEM}")
+		self.assertEqual(kwargs["job_id"], f"wave-sync:stock:{DUMMY_ITEM}")
 		self.assertTrue(kwargs["deduplicate"])
 		self.assertTrue(kwargs["enqueue_after_commit"])
 		self.assertEqual(kwargs["item_code"], DUMMY_ITEM)
