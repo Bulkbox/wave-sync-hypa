@@ -44,7 +44,13 @@ class TestWaveSettings(FrappeTestCase):
 			self.settings.save(ignore_permissions=True)
 
 	def test_enabling_without_inbound_key_is_rejected(self):
-		"""Turning the integration on requires an inbound API key; otherwise anyone could post."""
+		"""Turning the integration on with NO key on file is rejected; otherwise anyone could post."""
+		# Clear any leftover encrypted key so this test reflects a fresh-install state.
+		frappe.db.sql(
+			"DELETE FROM `__Auth` WHERE doctype='Wave Settings' AND fieldname='inbound_api_key'"
+		)
+		frappe.db.commit()
+		self.settings = frappe.get_single("Wave Settings")
 		self.settings.enabled = 1
 		self.settings.inbound_api_key = ""
 		with self.assertRaises(frappe.ValidationError):
@@ -111,3 +117,89 @@ class TestWaveSettings(FrappeTestCase):
 		reloaded.inbound_api_key = "*" * 12   # shorter than 32 but fully masked
 		# Should not raise — a masked value means "no change to the stored secret".
 		reloaded.save(ignore_permissions=True)
+
+	def test_null_inbound_key_with_stored_value_does_not_raise(self):
+		"""When the form posts inbound_api_key as None / '' but the encrypted store has a key, save still passes.
+
+		Regression cover for the data-loss reports: child-table-only edits in
+		the Desk sometimes posted the password field as null. The old validator
+		treated that as 'operator cleared the key' and threw, aborting the save
+		mid-flight after Frappe had already deleted the existing child rows.
+		"""
+		# Seed a real key first.
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "C" * 32
+		self.settings.save(ignore_permissions=True)
+		# Now simulate the form posting back with the in-memory field as None.
+		reloaded = frappe.get_single("Wave Settings")
+		reloaded.inbound_api_key = None
+		# Must not raise — the stored value is the source of truth.
+		reloaded.save(ignore_permissions=True)
+		# Confirm the stored value survived.
+		again = frappe.get_single("Wave Settings")
+		self.assertEqual(again.get_password("inbound_api_key", raise_exception=False), "C" * 32)
+
+	def test_empty_string_inbound_key_with_stored_value_does_not_raise(self):
+		"""Same regression cover for the empty-string variant — some browsers blank password fields on POST."""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "D" * 32
+		self.settings.save(ignore_permissions=True)
+		reloaded = frappe.get_single("Wave Settings")
+		reloaded.inbound_api_key = ""
+		reloaded.save(ignore_permissions=True)
+		again = frappe.get_single("Wave Settings")
+		self.assertEqual(again.get_password("inbound_api_key", raise_exception=False), "D" * 32)
+
+	def test_validate_skipped_during_install_and_migrate(self):
+		"""Framework-driven saves must not be blocked by operator-facing validation.
+
+		Patches and bench migrate may write to Wave Settings via
+		frappe.db.set_single_value (which bypasses validate) but also via
+		patches that load the doc and save it. In the latter case, the
+		in_install / in_migrate flags signal "trust the caller; skip operator
+		invariants" — exactly the convention ERPNext core uses.
+		"""
+		# Set up a state that would normally throw: enabled=1 with no key.
+		from wave_sync_hypa.wave_sync_hypa.doctype.wave_settings.wave_settings import WaveSettings
+
+		# Wipe the stored key so validate() would fail without the in_migrate guard.
+		frappe.db.sql(
+			"DELETE FROM `__Auth` WHERE doctype='Wave Settings' AND fieldname='inbound_api_key'"
+		)
+		frappe.db.commit()
+
+		settings = frappe.get_single("Wave Settings")
+		settings.enabled = 1
+		settings.inbound_api_key = None
+
+		# Without the guard, this would throw. Set in_migrate to verify the guard.
+		original = frappe.flags.in_migrate
+		frappe.flags.in_migrate = True
+		try:
+			settings.save(ignore_permissions=True)
+		finally:
+			frappe.flags.in_migrate = original
+
+		# Restore the test invariant: re-seed a key so other tests aren't affected.
+		settings.inbound_api_key = "E" * 32
+		settings.save(ignore_permissions=True)
+
+	def test_post_save_audit_row_records_child_table_counts(self):
+		"""Every Wave Settings save writes one Wave Sync Log row with the child-table head count.
+
+		That row is the canonical 'what was on file' record; used to investigate
+		any future 'my rules disappeared' claim with a single SQL filter.
+		"""
+		self.settings.enabled = 1
+		self.settings.inbound_api_key = "F" * 32
+		self.settings.save(ignore_permissions=True)
+		audit = frappe.get_all(
+			"Wave Sync Log",
+			filters={"step": "settings_post_save_snapshot"},
+			fields=["name", "request_body"],
+			order_by="creation desc",
+			limit=1,
+		)
+		self.assertEqual(len(audit), 1)
+		self.assertIn("child_table_row_counts", audit[0].request_body)
+		self.assertIn("inbound_api_key_on_file", audit[0].request_body)
