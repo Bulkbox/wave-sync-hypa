@@ -184,11 +184,12 @@ class TestDispatchFanOut(FrappeTestCase):
 			)
 
 		self.assertEqual(mock_enqueue.call_count, 2)
+		# Signature: _enqueue_push(source_doctype, source_docname, event, payload, correlation_id, wave_order_id)
 		# Each leg targets a distinct wave_order_id.
-		wave_ids_seen = [c.args[4] for c in mock_enqueue.call_args_list]
+		wave_ids_seen = [c.args[5] for c in mock_enqueue.call_args_list]
 		self.assertEqual(wave_ids_seen, [WAVE_ID_A, WAVE_ID_B])
 		# Single correlation_id for the whole emit (chains setup + per-leg rows).
-		correlations = {c.args[3] for c in mock_enqueue.call_args_list}
+		correlations = {c.args[4] for c in mock_enqueue.call_args_list}
 		self.assertEqual(len(correlations), 1)
 
 	def test_empty_id_list_logs_no_wave_id_skip_and_no_enqueue(self):
@@ -233,6 +234,6 @@ class TestDispatchFanOut(FrappeTestCase):
 
 		mock_resolver.assert_not_called()
 		mock_enqueue.assert_called_once()
-		# args = (doc.name, event, payload, correlation_id, wave_order_id)
-		self.assertEqual(mock_enqueue.call_args.args[2], {"status": "CANCELLED"})
-		self.assertEqual(mock_enqueue.call_args.args[1], "credit_note_submit")
+		# args = (source_doctype, source_docname, event, payload, correlation_id, wave_order_id)
+		self.assertEqual(mock_enqueue.call_args.args[2], "credit_note_submit")
+		self.assertEqual(mock_enqueue.call_args.args[3], {"status": "CANCELLED"})

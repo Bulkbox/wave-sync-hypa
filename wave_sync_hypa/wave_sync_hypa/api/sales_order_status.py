@@ -48,10 +48,12 @@ def resync_order_status(sales_order: str) -> dict:
 	frappe.enqueue(
 		WORKER_DOTTED_PATH,
 		queue="default",
-		sales_order_name=doc.name,
+		source_doctype=doc.doctype,
+		source_docname=doc.name,
 		erp_event=event,
 		payload=payload,
 		correlation_id=correlation_id,
+		wave_order_id=doc.get("wave_order_id") or "",
 	)
 	log_step(
 		correlation_id=correlation_id,

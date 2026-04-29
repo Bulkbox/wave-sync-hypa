@@ -1,4 +1,4 @@
-"""Worker job: POST a resolved status transition to Wave for one Sales Order.
+"""Worker job: POST a resolved status transition to Wave for one ERP source doc.
 
 Wave's status endpoint is path-keyed:
 
@@ -9,6 +9,13 @@ deliveryStatus yet. The resolver may emit a payload carrying
 {"status": "...", "deliveryStatus": "..."} based on rule rows; this
 worker pushes the status component via the supported endpoint and logs
 + skips the deliveryStatus component until Wave provides its endpoint.
+
+Source-doc identity (`source_doctype` + `source_docname`) is plumbed in
+from the dispatcher so the audit log rows correctly point to the
+triggering ERP document — Sales Order on SO submit/cancel, Delivery Note
+on DN submit, Sales Invoice on SI / credit-note submit. Without this,
+the Dynamic Link on Wave Sync Log fails validation when the source
+isn't a Sales Order, which silently swallows the entire dispatch.
 
 Mirrors the stock_pusher pattern: re-reads Wave Settings on every
 invocation (mid-queue kill-switch safety), validates outbound config,
@@ -58,12 +65,17 @@ WAVE_TERMINAL_TRANSITION_CODES = frozenset(
 
 
 def push_order_status(
-	sales_order_name: str,
-	erp_event: str,
-	payload: dict,
-	correlation_id: str,
+	source_doctype: str = "Sales Order",
+	source_docname: str = "",
+	erp_event: str = "",
+	payload: dict | None = None,
+	correlation_id: str = "",
+	wave_order_id: str = "",
+	# Back-compat: older queued jobs from Phase 5 used `sales_order_name`.
+	# Any in-flight job at the moment of deploy will land here and keep working.
+	sales_order_name: str | None = None,
 ) -> None:
-	"""Job entry point: POST the resolved status transition to Wave for one SO; never raises.
+	"""Job entry point: POST the resolved status transition to Wave; never raises.
 
 	The kwarg is `erp_event` not `event` because `event` is reserved by
 	frappe.enqueue's own signature (used for scheduled-job firing semantics).
@@ -77,33 +89,53 @@ def push_order_status(
 	"function never enters" bug is visible in the audit trail without having
 	to grep Error Log.
 	"""
+	if sales_order_name and not source_docname:
+		source_docname = sales_order_name
+	if payload is None:
+		payload = {}
 	log_step(
 		correlation_id=correlation_id,
 		step=STEP_WORKER_STARTED,
 		level="Info",
-		doc_type="Sales Order",
+		doc_type=source_doctype,
 		action=erp_event,
-		linked_doctype="Sales Order",
-		linked_docname=sales_order_name,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
+		wave_id=wave_order_id or None,
 	)
 	try:
-		_push_inner(sales_order_name, erp_event, payload, correlation_id)
+		_push_inner(source_doctype, source_docname, erp_event, payload, correlation_id, wave_order_id)
 	except Exception as exc:
 		log_step(
 			correlation_id=correlation_id,
 			step=STEP_PUSH_UNEXPECTED_ERROR,
 			level="Error",
-			doc_type="Sales Order",
+			doc_type=source_doctype,
 			action=erp_event,
-			linked_doctype="Sales Order",
-			linked_docname=sales_order_name,
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
+			wave_id=wave_order_id or None,
 			error_message=f"unexpected exception in push_order_status: {exc}",
 			stack_trace=frappe.get_traceback(),
 		)
 
 
-def _push_inner(sales_order_name: str, erp_event: str, payload: dict, correlation_id: str) -> None:
-	"""Real work: validate config, resolve wave_order_id, POST status, log transitions."""
+def _push_inner(
+	source_doctype: str,
+	source_docname: str,
+	erp_event: str,
+	payload: dict,
+	correlation_id: str,
+	wave_order_id: str,
+) -> None:
+	"""Real work: validate config, POST status, log transitions.
+
+	wave_order_id is plumbed from the dispatcher; we no longer re-look it up
+	from a Sales Order. That re-lookup was wrong for DN/SI dispatches (the
+	worker would query `Sales Order` keyed on a DN/SI name and get None),
+	and is unnecessary for SO dispatches because the dispatcher already
+	read the same value before enqueueing.
+	"""
 	settings = frappe.get_cached_doc("Wave Settings")
 
 	if not settings.get("outbound_order_status_sync_enabled"):
@@ -111,25 +143,25 @@ def _push_inner(sales_order_name: str, erp_event: str, payload: dict, correlatio
 			correlation_id=correlation_id,
 			step=STEP_PUSH_ABORTED_DISABLED,
 			level="Warning",
-			doc_type="Sales Order",
+			doc_type=source_doctype,
 			action=erp_event,
-			linked_doctype="Sales Order",
-			linked_docname=sales_order_name,
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
+			wave_id=wave_order_id or None,
 			error_message="outbound_order_status_sync_enabled is off; skipping push.",
 		)
 		return
 
-	wave_order_id = frappe.db.get_value("Sales Order", sales_order_name, "wave_order_id")
 	if not wave_order_id:
 		log_step(
 			correlation_id=correlation_id,
 			step=STEP_PUSH_ABORTED_NO_WAVE_ID,
 			level="Warning",
-			doc_type="Sales Order",
+			doc_type=source_doctype,
 			action=erp_event,
-			linked_doctype="Sales Order",
-			linked_docname=sales_order_name,
-			error_message="Sales Order has no wave_order_id at run time; cannot push.",
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
+			error_message="Worker received empty wave_order_id; cannot push.",
 		)
 		return
 
@@ -139,16 +171,18 @@ def _push_inner(sales_order_name: str, erp_event: str, payload: dict, correlatio
 			correlation_id=correlation_id,
 			step=STEP_PUSH_ABORTED_MISSING_CONFIG,
 			level="Error",
-			doc_type="Sales Order",
+			doc_type=source_doctype,
 			action=erp_event,
-			linked_doctype="Sales Order",
-			linked_docname=sales_order_name,
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
 			wave_id=wave_order_id,
 			error_message="Wave outbound config incomplete (base_url / api_key / app_id).",
 		)
 		return
 
-	_warn_if_delivery_status_present(payload, sales_order_name, erp_event, correlation_id, wave_order_id)
+	_warn_if_delivery_status_present(
+		payload, source_doctype, source_docname, erp_event, correlation_id, wave_order_id
+	)
 
 	status_name = (payload or {}).get("status")
 	if not status_name:
@@ -157,21 +191,22 @@ def _push_inner(sales_order_name: str, erp_event: str, payload: dict, correlatio
 			correlation_id=correlation_id,
 			step=STEP_PUSH_ABORTED_EMPTY_PAYLOAD,
 			level="Info",
-			doc_type="Sales Order",
+			doc_type=source_doctype,
 			action=erp_event,
-			linked_doctype="Sales Order",
-			linked_docname=sales_order_name,
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
 			wave_id=wave_order_id,
 			error_message="No supported field in resolved payload (status missing).",
 			request_body={"resolved_payload": payload},
 		)
 		return
 
-	_post_status(sales_order_name, erp_event, correlation_id, wave_order_id, config, status_name)
+	_post_status(source_doctype, source_docname, erp_event, correlation_id, wave_order_id, config, status_name)
 
 
 def _post_status(
-	sales_order_name: str,
+	source_doctype: str,
+	source_docname: str,
 	erp_event: str,
 	correlation_id: str,
 	wave_order_id: str,
@@ -184,10 +219,10 @@ def _post_status(
 		correlation_id=correlation_id,
 		step=STEP_PUSH_ATTEMPT,
 		level="Info",
-		doc_type="Sales Order",
+		doc_type=source_doctype,
 		action=erp_event,
-		linked_doctype="Sales Order",
-		linked_docname=sales_order_name,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
 		wave_id=wave_order_id,
 		request_body={
 			"method": "POST",
@@ -218,10 +253,10 @@ def _post_status(
 			correlation_id=correlation_id,
 			step=STEP_PUSH_SKIPPED_TERMINAL if is_terminal else STEP_PUSH_FAILED,
 			level="Warning" if is_terminal else "Error",
-			doc_type="Sales Order",
+			doc_type=source_doctype,
 			action=erp_event,
-			linked_doctype="Sales Order",
-			linked_docname=sales_order_name,
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
 			wave_id=wave_order_id,
 			request_body={"path": url_path, "status_name": status_name},
 			error_message=str(exc),
@@ -233,10 +268,10 @@ def _post_status(
 		correlation_id=correlation_id,
 		step=STEP_PUSH_SUCCESS,
 		level="Info",
-		doc_type="Sales Order",
+		doc_type=source_doctype,
 		action=erp_event,
-		linked_doctype="Sales Order",
-		linked_docname=sales_order_name,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
 		wave_id=wave_order_id,
 		request_body={"path": url_path, "status_name": status_name},
 		response_body=response,
@@ -245,7 +280,8 @@ def _post_status(
 
 def _warn_if_delivery_status_present(
 	payload: dict,
-	sales_order_name: str,
+	source_doctype: str,
+	source_docname: str,
 	erp_event: str,
 	correlation_id: str,
 	wave_order_id: str,
@@ -264,10 +300,10 @@ def _warn_if_delivery_status_present(
 		correlation_id=correlation_id,
 		step=STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED,
 		level="Warning",
-		doc_type="Sales Order",
+		doc_type=source_doctype,
 		action=erp_event,
-		linked_doctype="Sales Order",
-		linked_docname=sales_order_name,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
 		wave_id=wave_order_id,
 		request_body={"requested_delivery_status": delivery_status},
 		error_message=(

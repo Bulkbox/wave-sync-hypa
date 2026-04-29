@@ -125,11 +125,25 @@ def dispatch_with_wave_order_ids(
 		payload = forced_payload
 
 	for wave_order_id in wave_order_ids:
-		_enqueue_push(doc.name, event, payload, correlation_id, wave_order_id)
+		_enqueue_push(doc.doctype, doc.name, event, payload, correlation_id, wave_order_id)
 
 
-def _enqueue_push(sales_order_name: str, event: str, payload: dict, correlation_id: str, wave_order_id: str) -> None:
-	"""Queue the worker job, baking the resolved payload into the kwargs.
+def _enqueue_push(
+	source_doctype: str,
+	source_docname: str,
+	event: str,
+	payload: dict,
+	correlation_id: str,
+	wave_order_id: str,
+) -> None:
+	"""Queue the worker job, baking the resolved payload + source-doc identity into the kwargs.
+
+	`source_doctype` and `source_docname` identify the ERP document that
+	triggered this push (Sales Order / Delivery Note / Sales Invoice). They
+	are plumbed into both the log rows and the worker so the Dynamic Link
+	on Wave Sync Log (`linked_doctype` + `linked_docname`) resolves to the
+	*actual* triggering document — clicking through the audit trail jumps
+	to the DN that fired the dispatch, not a phantom "Sales Order" row.
 
 	Note: the worker function expects `erp_event`, not `event`. `event` is a
 	reserved kwarg in frappe.enqueue's own signature (used for scheduled-job
@@ -141,20 +155,22 @@ def _enqueue_push(sales_order_name: str, event: str, payload: dict, correlation_
 			WORKER_DOTTED_PATH,
 			queue="default",
 			enqueue_after_commit=True,
-			sales_order_name=sales_order_name,
+			source_doctype=source_doctype,
+			source_docname=source_docname,
 			erp_event=event,
 			payload=payload,
 			correlation_id=correlation_id,
+			wave_order_id=wave_order_id,
 		)
 	except Exception as exc:
 		log_step(
 			correlation_id=correlation_id,
 			step=STEP_ENQUEUE_FAILED,
 			level="Error",
-			doc_type="Sales Order",
+			doc_type=source_doctype,
 			action=event,
-			linked_doctype="Sales Order",
-			linked_docname=sales_order_name,
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
 			wave_id=wave_order_id,
 			error_message=f"failed to enqueue order-status push: {exc}",
 			stack_trace=frappe.get_traceback(),
@@ -165,10 +181,10 @@ def _enqueue_push(sales_order_name: str, event: str, payload: dict, correlation_
 		correlation_id=correlation_id,
 		step=STEP_ENQUEUED,
 		level="Info",
-		doc_type="Sales Order",
+		doc_type=source_doctype,
 		action=event,
-		linked_doctype="Sales Order",
-		linked_docname=sales_order_name,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
 		wave_id=wave_order_id,
 		request_body={"event": event, "payload": payload},
 	)
