@@ -57,20 +57,23 @@ class WaveSettings(Document):
 		   survives.
 
 		2. Child tables. The migrate / install / patch / fixtures pipelines
-		   sometimes load Wave Settings with the child-table attributes
-		   empty (operator never opened the doc; framework just calls save
-		   to re-apply schema defaults). Frappe then DELETEs all child rows
-		   for those tables because the in-memory list is empty. The audit
-		   trail confirmed exactly this: 26 saves in 1s during one migrate,
-		   route_rules went from 1 → 0 between consecutive saves.
-		   Fix: ONLY during framework-driven saves, when an in-memory child
-		   table is empty but the DB has rows, repopulate from DB. A real
-		   operator UI save with empty children is honored as-is — they
-		   meant to clear the table.
+		   AND uncoordinated test runs against the same site sometimes
+		   load Wave Settings with child-table attributes empty (operator
+		   never opened the doc; framework just calls save to re-apply
+		   schema defaults; or a test deliberately blanks the table for
+		   its own assertion). Frappe then DELETEs all child rows for
+		   those tables because the in-memory list is empty. We've now
+		   lost route_rules at least three times this way.
+		   Fix: protect on EVERY save, not just framework-driven. The
+		   "operator legitimately wants to clear a table" UX is an edge
+		   case (operators delete rows individually); the cost-benefit
+		   strongly favours protection. To explicitly clear a table now,
+		   use SQL or set self.flags.allow_child_table_clear = True
+		   before save (used by the audit-test that pins this behaviour).
 		"""
 		for field in PASSWORD_FIELDS:
 			self._preserve_password_if_unchanged(field)
-		if self._is_framework_driven_save():
+		if not getattr(self.flags, "allow_child_table_clear", False):
 			for field in CHILD_TABLE_FIELDS:
 				self._preserve_child_table_if_unchanged(field)
 
@@ -115,11 +118,14 @@ class WaveSettings(Document):
 	def _preserve_child_table_if_unchanged(self, tablefield: str) -> None:
 		"""Repopulate an in-memory child table from DB when it's empty but the DB has rows.
 
-		Called only on framework-driven saves (in_install / in_migrate /
-		in_patch / in_fixtures). For UI saves we trust the operator's intent
-		even if they cleared a table. Without this guard, a migrate-time
-		save where Frappe didn't fully load the doc wipes every rule the
-		operator configured.
+		Called on EVERY save unless the caller sets
+		`self.flags.allow_child_table_clear = True`. Operators who want to
+		clear a table do so by deleting rows in the form (each delete +
+		save still leaves the other rows intact); they don't blank the
+		whole table in one action. Framework-driven saves (migrate /
+		install / patch / fixtures) and uncoordinated test runs both load
+		the doc with empty in-memory child lists, and without this guard
+		Frappe DELETEs every row from the corresponding child tables.
 		"""
 		current = self.get(tablefield) or []
 		if current:
