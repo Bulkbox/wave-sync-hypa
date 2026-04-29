@@ -156,6 +156,10 @@ doc_events = {
 		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.delivery_note.stamp_wave_order_id",
 		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.delivery_note.on_delivery_note_submit",
 	},
+	"Sales Invoice": {
+		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.sales_invoice.stamp_wave_order_id",
+		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.sales_invoice.on_sales_invoice_submit",
+	},
 }
 
 # Scheduled Tasks
