@@ -242,6 +242,89 @@ class TestWorker(FrappeTestCase):
 		self.assertEqual(len(failures), 1)
 		self.assertEqual(failures[0].kwargs.get("level"), "Error")
 
+	def test_soft_skips_terminal_state_when_wave_returns_ORDER0049(self):
+		"""ORDER0049 (forbidden transition) -> Warning + STEP_PUSH_SKIPPED_TERMINAL, not Error.
+
+		Drives the amend / re-submit case: ERP fires submit on an SO whose Wave
+		counterpart already moved past ACCEPTED. Without this classification
+		the ambient Error rate spikes whenever an order is amended, drowning
+		real failures in noise.
+		"""
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
+			patch.object(
+				order_status_pusher.wave_client,
+				"post_order_status",
+				side_effect=WaveOutboundError(
+					"Wave order status returned HTTP 422: ...",
+					http_status=422,
+					wave_code="ORDER0049",
+				),
+			),
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-0049")
+
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_PUSH_SKIPPED_TERMINAL, steps)
+		self.assertNotIn(order_status_pusher.STEP_PUSH_FAILED, steps)
+		skipped = [
+			c for c in mock_log.call_args_list
+			if c.kwargs.get("step") == order_status_pusher.STEP_PUSH_SKIPPED_TERMINAL
+		]
+		self.assertEqual(skipped[0].kwargs.get("level"), "Warning")
+		# stack_trace is suppressed on soft-skips — terminal-state rejections
+		# carry no useful traceback (the failure is on Wave's side).
+		self.assertIsNone(skipped[0].kwargs.get("stack_trace"))
+
+	def test_soft_skips_terminal_state_when_wave_returns_ORDER0034(self):
+		"""ORDER0034 (unauthorized — order already terminal) is treated identically to ORDER0049."""
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
+			patch.object(
+				order_status_pusher.wave_client,
+				"post_order_status",
+				side_effect=WaveOutboundError(
+					"Wave order status returned HTTP 422: ...",
+					http_status=422,
+					wave_code="ORDER0034",
+				),
+			),
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			order_status_pusher.push_order_status(DUMMY_SO, "cancel", {"status": "CANCELLED"}, "corr-0034")
+
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_PUSH_SKIPPED_TERMINAL, steps)
+		self.assertNotIn(order_status_pusher.STEP_PUSH_FAILED, steps)
+
+	def test_unknown_wave_code_still_logged_as_error(self):
+		"""A 422 with an unfamiliar wave_code stays Error so the team gets paged."""
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
+			patch.object(
+				order_status_pusher.wave_client,
+				"post_order_status",
+				side_effect=WaveOutboundError(
+					"Wave order status returned HTTP 422: ...",
+					http_status=422,
+					wave_code="ORDER9999",
+				),
+			),
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-unknown-422")
+
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_PUSH_FAILED, steps)
+		self.assertNotIn(order_status_pusher.STEP_PUSH_SKIPPED_TERMINAL, steps)
+
 	def test_aborts_when_kill_switch_off_at_run_time(self):
 		settings = _stub_settings(enabled=False)
 		with (

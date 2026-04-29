@@ -28,6 +28,7 @@ from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 STEP_PUSH_ATTEMPT = "order_status_push_attempt"
 STEP_PUSH_SUCCESS = "order_status_push_success"
 STEP_PUSH_FAILED = "order_status_push_failed"
+STEP_PUSH_SKIPPED_TERMINAL = "order_status_push_skipped_terminal"
 STEP_PUSH_ABORTED_DISABLED = "order_status_push_aborted_settings_off"
 STEP_PUSH_ABORTED_MISSING_CONFIG = "order_status_push_aborted_missing_config"
 STEP_PUSH_ABORTED_NO_WAVE_ID = "order_status_push_aborted_no_wave_order_id"
@@ -35,6 +36,25 @@ STEP_PUSH_ABORTED_EMPTY_PAYLOAD = "order_status_push_aborted_empty_payload"
 STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED = "order_status_push_delivery_status_unsupported"
 STEP_PUSH_UNEXPECTED_ERROR = "order_status_push_unexpected_error"
 STEP_WORKER_STARTED = "order_status_push_worker_started"
+
+# Wave application-level error codes that mean "the order moved past the
+# state we tried to set on it" (or "you can't act on this terminal order").
+# Both are emitted by Wave on legitimate ERP-side amend / re-cancel flows
+# where ERP fires submit/cancel a second time on an order Wave already
+# considers settled. They are NOT actionable bugs; logging them at Error
+# level was masking real failures behind ambient noise. We classify them
+# as Warning + STEP_PUSH_SKIPPED_TERMINAL so dashboards can filter them
+# out without losing the audit trail.
+WAVE_TERMINAL_TRANSITION_CODES = frozenset(
+	{
+		"ORDER0034",  # "You are not authorized to access this order" — typically returned
+		# when the order has already been finalised on Wave's side and our app_id
+		# can no longer mutate it (e.g. push CANCELLED on an already-cancelled order).
+		"ORDER0049",  # "You cannot change the order status to the desired status" — Wave
+		# rejects the requested transition because the current state forbids it
+		# (e.g. push ACCEPTED on an order Wave already moved to UNDER_PICKING).
+	}
+)
 
 
 def push_order_status(
@@ -186,10 +206,18 @@ def _post_status(
 			status_name=status_name,
 		)
 	except WaveOutboundError as exc:
+		# Wave rejected the transition. Two flavours:
+		#   - Terminal-state codes (ORDER0034 / ORDER0049): the order is already
+		#     past where we were trying to take it. Not a bug; log Warning +
+		#     STEP_PUSH_SKIPPED_TERMINAL so audit dashboards stop alerting on
+		#     amend / re-cancel noise.
+		#   - Anything else (auth, 5xx, network, unknown 422): real failure,
+		#     log Error + STEP_PUSH_FAILED so the team sees it.
+		is_terminal = exc.wave_code in WAVE_TERMINAL_TRANSITION_CODES
 		log_step(
 			correlation_id=correlation_id,
-			step=STEP_PUSH_FAILED,
-			level="Error",
+			step=STEP_PUSH_SKIPPED_TERMINAL if is_terminal else STEP_PUSH_FAILED,
+			level="Warning" if is_terminal else "Error",
 			doc_type="Sales Order",
 			action=erp_event,
 			linked_doctype="Sales Order",
@@ -197,7 +225,7 @@ def _post_status(
 			wave_id=wave_order_id,
 			request_body={"path": url_path, "status_name": status_name},
 			error_message=str(exc),
-			stack_trace=frappe.get_traceback(),
+			stack_trace=None if is_terminal else frappe.get_traceback(),
 		)
 		return
 
