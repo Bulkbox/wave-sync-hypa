@@ -39,7 +39,30 @@ def on_sales_order_cancel(doc, method=None) -> None:
 
 
 def _dispatch(doc, event: str) -> None:
-	"""Resolve rules and enqueue, or log the precise reason for skipping."""
+	"""Single-source dispatch: read doc.wave_order_id, hand off to the fan-out helper.
+
+	The Sales Order on_submit / on_cancel paths walk through here. The DN /
+	SI handlers (which can carry items from multiple Wave-sourced SOs in a
+	single document) call dispatch_with_wave_order_ids directly with their
+	own pre-computed list.
+	"""
+	wave_order_id = doc.get("wave_order_id") or ""
+	dispatch_with_wave_order_ids(doc, event, [wave_order_id] if wave_order_id else [])
+
+
+def dispatch_with_wave_order_ids(doc, event: str, wave_order_ids: list[str]) -> None:
+	"""Resolve rules once for this (doctype, event) and enqueue one push per wave_order_id.
+
+	Single correlation_id covers the whole emit so all log rows for the
+	dispatch — setup, skips, every per-leg enqueue — chain together. Per-row
+	traceability for which Wave order each leg targeted is preserved on the
+	`wave_id` column of each log row.
+
+	Multi-leg fan-out is the DN / SI use case: one ERP document produced from
+	items belonging to several Wave-sourced Sales Orders. Each leg becomes
+	an independent worker job so a transient failure on one Wave order
+	doesn't block the others.
+	"""
 	correlation_id = new_correlation_id()
 	settings = frappe.get_cached_doc("Wave Settings")
 
@@ -56,8 +79,7 @@ def _dispatch(doc, event: str) -> None:
 		)
 		return
 
-	wave_order_id = doc.get("wave_order_id") or ""
-	if not wave_order_id:
+	if not wave_order_ids:
 		log_step(
 			correlation_id=correlation_id,
 			step=STEP_SKIPPED_NO_WAVE_ID,
@@ -66,7 +88,7 @@ def _dispatch(doc, event: str) -> None:
 			action=event,
 			linked_doctype=doc.doctype,
 			linked_docname=doc.name,
-			error_message="Sales Order has no wave_order_id; not a Wave-sourced order.",
+			error_message=f"{doc.doctype} has no Wave-sourced order to push status to.",
 		)
 		return
 
@@ -80,12 +102,13 @@ def _dispatch(doc, event: str) -> None:
 			action=event,
 			linked_doctype=doc.doctype,
 			linked_docname=doc.name,
-			wave_id=wave_order_id,
+			wave_id=wave_order_ids[0] if len(wave_order_ids) == 1 else None,
 			error_message=f"No enabled outbound status rule matched ({doc.doctype}, {event}).",
 		)
 		return
 
-	_enqueue_push(doc.name, event, payload, correlation_id, wave_order_id)
+	for wave_order_id in wave_order_ids:
+		_enqueue_push(doc.name, event, payload, correlation_id, wave_order_id)
 
 
 def _enqueue_push(sales_order_name: str, event: str, payload: dict, correlation_id: str, wave_order_id: str) -> None:
