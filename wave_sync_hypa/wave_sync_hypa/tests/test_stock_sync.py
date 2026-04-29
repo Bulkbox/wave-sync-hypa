@@ -1,8 +1,13 @@
 """Unit tests for the outbound stock-sync pipeline.
 
 Covers the SLE on_submit handler (filters + enqueue), the stock_pusher worker
-(payload shape + log emission), and the wave_client HTTP wrapper. All HTTP is
-mocked at requests.post so tests never touch the real Wave API.
+(resolve-then-push flow + payload shape + log emission), and the wave_client
+HTTP wrapper. All HTTP is mocked at requests.post so tests never touch the
+real Wave API.
+
+Phase note: the pusher now resolves a Wave-side product `_id` (cached on
+Item.wave_product_id) before posting stock, and re-resolves once when Wave
+rejects the cached id with PRODUCT0006. Tests pin both legs of that flow.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ DUMMY_API_KEY = "test-api-key-123"
 DUMMY_APP_ID = "test-app-id"
 DUMMY_STORE_ID = "1"
 DUMMY_ITEM = "TEST-SKU-001"
+DUMMY_WAVE_PRODUCT_ID = "69e0d857fe91acfd81c57396"
 DUMMY_DEFAULT_WAREHOUSE = "Stores - WAVE"
 DUMMY_OTHER_WAREHOUSE = "WIP - WAVE"
 
@@ -50,6 +56,26 @@ def _fake_sle(item_code: str = DUMMY_ITEM, warehouse: str = DUMMY_DEFAULT_WAREHO
 		"warehouse": warehouse,
 	}.get(key, default)
 	return sle
+
+
+def _mock_db_get_value(wave_id: str | None = DUMMY_WAVE_PRODUCT_ID, qty: float = 42.0):
+	"""Return a side_effect for frappe.db.get_value that handles both pusher call sites.
+
+	The pusher reads two values:
+	  - frappe.db.get_value("Item", item_code, "wave_product_id")  -> cached Wave id
+	  - frappe.db.get_value("Bin", {...}, "actual_qty")            -> current stock
+	One return value can't satisfy both call shapes, so this dispatcher branches
+	on the first positional arg (the doctype name).
+	"""
+	def _impl(*args, **kwargs):
+		if not args:
+			return None
+		if args[0] == "Item":
+			return wave_id
+		if args[0] == "Bin":
+			return qty
+		return None
+	return _impl
 
 
 class TestSleSubmitHandler(FrappeTestCase):
@@ -129,11 +155,11 @@ class TestSleSubmitHandler(FrappeTestCase):
 class TestStockPusherWorker(FrappeTestCase):
 	"""Verify the worker reads Bin qty, posts the right body, and logs every outcome."""
 
-	def test_push_posts_correct_payload_and_logs_success(self):
-		"""Happy path: Bin -> wave_client.post_stock_sync called with absolute qty."""
+	def test_push_uses_cached_wave_id_and_logs_success(self):
+		"""Happy path: cached wave_product_id is sent on the URL, body keeps sku in productId."""
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
-			patch.object(frappe.db, "get_value", return_value=42.0),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value()),
 			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={"ok": True}) as mock_post,
 			patch.object(stock_pusher, "log_step") as mock_log,
 		):
@@ -143,7 +169,7 @@ class TestStockPusherWorker(FrappeTestCase):
 			base_url=DUMMY_BASE_URL,
 			api_key=DUMMY_API_KEY,
 			app_id=DUMMY_APP_ID,
-			product_id=DUMMY_ITEM,
+			product_id=DUMMY_WAVE_PRODUCT_ID,
 			store_id=DUMMY_STORE_ID,
 			quantity=42,
 		)
@@ -151,11 +177,111 @@ class TestStockPusherWorker(FrappeTestCase):
 		self.assertIn(stock_pusher.STEP_PUSH_ATTEMPT, steps)
 		self.assertIn(stock_pusher.STEP_PUSH_SUCCESS, steps)
 
+	def test_push_resolves_when_no_cached_wave_id(self):
+		"""When Item.wave_product_id is empty, the resolver runs once and the resolved id is sent."""
+		resolver_id = "newly-resolved-mongo-id"
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(wave_id=None)),
+			patch.object(
+				stock_pusher.product_resolver,
+				"resolve_wave_product_id",
+				return_value=resolver_id,
+			) as mock_resolve,
+			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={"ok": True}) as mock_post,
+			patch.object(stock_pusher, "log_step"),
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-noid")
+
+		mock_resolve.assert_called_once()
+		self.assertEqual(mock_post.call_args.kwargs["product_id"], resolver_id)
+
+	def test_push_aborts_when_resolver_returns_none(self):
+		"""Item with no cached id and no Wave hit -> log abort, never call HTTP."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(wave_id=None)),
+			patch.object(
+				stock_pusher.product_resolver, "resolve_wave_product_id", return_value=None
+			),
+			patch.object(stock_pusher.wave_client, "post_stock_sync") as mock_post,
+			patch.object(stock_pusher, "log_step") as mock_log,
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-unmapped")
+
+		mock_post.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(stock_pusher.STEP_PUSH_ABORTED_UNMAPPED, steps)
+
+	def test_push_retries_after_resolve_on_PRODUCT0006(self):
+		"""PRODUCT0006 from Wave -> re-resolve once and retry the push with the fresh id."""
+		fresh_id = "fresh-wave-id"
+		first_error = WaveOutboundError(
+			"Wave stock/sync returned HTTP 422: ...",
+			http_status=422,
+			wave_code="PRODUCT0006",
+			response_text="...",
+		)
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value()),
+			patch.object(
+				stock_pusher.product_resolver,
+				"resolve_wave_product_id",
+				return_value=fresh_id,
+			) as mock_resolve,
+			patch.object(
+				stock_pusher.wave_client,
+				"post_stock_sync",
+				side_effect=[first_error, {"ok": True}],
+			) as mock_post,
+			patch.object(stock_pusher, "log_step") as mock_log,
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-stale")
+
+		# First call used the cached id, second used the freshly-resolved id.
+		first_call_id = mock_post.call_args_list[0].kwargs["product_id"]
+		second_call_id = mock_post.call_args_list[1].kwargs["product_id"]
+		self.assertEqual(first_call_id, DUMMY_WAVE_PRODUCT_ID)
+		self.assertEqual(second_call_id, fresh_id)
+		mock_resolve.assert_called_once()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(stock_pusher.STEP_PUSH_RETRY_AFTER_RESOLVE, steps)
+		self.assertIn(stock_pusher.STEP_PUSH_SUCCESS, steps)
+
+	def test_push_does_not_retry_on_unrelated_wave_error(self):
+		"""Errors other than PRODUCT0006 (auth, 5xx, validation) must not trigger re-resolve."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value()),
+			patch.object(
+				stock_pusher.product_resolver, "resolve_wave_product_id"
+			) as mock_resolve,
+			patch.object(
+				stock_pusher.wave_client,
+				"post_stock_sync",
+				side_effect=WaveOutboundError(
+					"Wave stock/sync returned HTTP 500: boom",
+					http_status=500,
+					wave_code=None,
+				),
+			) as mock_post,
+			patch.object(stock_pusher, "log_step") as mock_log,
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-500")
+
+		# Exactly one POST attempt, no resolver call.
+		self.assertEqual(mock_post.call_count, 1)
+		mock_resolve.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(stock_pusher.STEP_PUSH_FAILED, steps)
+		self.assertNotIn(stock_pusher.STEP_PUSH_RETRY_AFTER_RESOLVE, steps)
+
 	def test_push_clamps_negative_qty_to_zero(self):
 		"""Negative Bin qty (oversold) is pushed as 0 — Wave shouldn't go negative."""
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
-			patch.object(frappe.db, "get_value", return_value=-3.0),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(qty=-3.0)),
 			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={}) as mock_post,
 			patch.object(stock_pusher, "log_step"),
 		):
@@ -167,11 +293,11 @@ class TestStockPusherWorker(FrappeTestCase):
 		"""WaveOutboundError from the client is logged at Error level and swallowed."""
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
-			patch.object(frappe.db, "get_value", return_value=10.0),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(qty=10.0)),
 			patch.object(
 				stock_pusher.wave_client,
 				"post_stock_sync",
-				side_effect=WaveOutboundError("HTTP 500: boom"),
+				side_effect=WaveOutboundError("HTTP 500: boom", http_status=500),
 			),
 			patch.object(stock_pusher, "log_step") as mock_log,
 		):
@@ -199,7 +325,7 @@ class TestStockPusherWorker(FrappeTestCase):
 		"""When called with batch_id, every log row carries it as friendly_id for batch-filtering."""
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
-			patch.object(frappe.db, "get_value", return_value=7.0),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(qty=7.0)),
 			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={}),
 			patch.object(stock_pusher, "log_step") as mock_log,
 		):
@@ -236,7 +362,7 @@ class TestStockPusherWorker(FrappeTestCase):
 		settings.get.side_effect = _missing_app_id
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=5.0),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(qty=5.0)),
 			patch.object(stock_pusher.wave_client, "post_stock_sync") as mock_post,
 			patch.object(stock_pusher, "log_step") as mock_log,
 		):
@@ -282,6 +408,7 @@ class TestWaveClient(FrappeTestCase):
 		fake_response = MagicMock(status_code=500)
 		fake_response.text = "internal server error"
 		fake_response.content = b"internal server error"
+		fake_response.json.side_effect = ValueError("not json")
 
 		with patch.object(requests, "post", return_value=fake_response):
 			with self.assertRaises(WaveOutboundError) as ctx:
@@ -295,6 +422,34 @@ class TestWaveClient(FrappeTestCase):
 				)
 		self.assertIn("HTTP 500", str(ctx.exception))
 		self.assertIn("internal server error", str(ctx.exception))
+		self.assertEqual(ctx.exception.http_status, 500)
+		self.assertIsNone(ctx.exception.wave_code)
+
+	def test_non_2xx_with_wave_code_envelope_attaches_code(self):
+		"""Wave's standard {code, userMessage, ...} 422 body populates the structured fields."""
+		envelope = {
+			"code": "PRODUCT0006",
+			"userTitle": "Validation Error",
+			"userMessage": "Cannot create or update product, the product with id not found.",
+		}
+		fake_response = MagicMock(status_code=422)
+		fake_response.text = '{"code":"PRODUCT0006",...}'
+		fake_response.content = b'{"code":"PRODUCT0006",...}'
+		fake_response.json.return_value = envelope
+
+		with patch.object(requests, "post", return_value=fake_response):
+			with self.assertRaises(WaveOutboundError) as ctx:
+				wave_client.post_stock_sync(
+					base_url=DUMMY_BASE_URL,
+					api_key=DUMMY_API_KEY,
+					app_id=DUMMY_APP_ID,
+					product_id=DUMMY_ITEM,
+					store_id=DUMMY_STORE_ID,
+					quantity=1,
+				)
+
+		self.assertEqual(ctx.exception.http_status, 422)
+		self.assertEqual(ctx.exception.wave_code, "PRODUCT0006")
 
 	def test_network_error_wrapped_as_outbound_error(self):
 		"""requests.RequestException becomes a WaveOutboundError with a clean message."""
@@ -323,3 +478,84 @@ class TestWaveClient(FrappeTestCase):
 					quantity=1,
 				)
 		mock_post.assert_not_called()
+
+
+class TestWaveClientGetProductBySku(FrappeTestCase):
+	"""HTTP-shape tests for wave_client.get_product_by_sku.
+
+	Wave's contract for this endpoint is unusual (200 + empty body for unknown
+	sku, not 404), so the wrapper centralises the empty-body -> None mapping
+	and these tests pin the behaviour we rely on in product_resolver.
+	"""
+
+	def test_returns_parsed_dict_on_200_with_id(self):
+		"""200 + JSON body containing _id -> caller gets the parsed dict."""
+		body = {"_id": DUMMY_WAVE_PRODUCT_ID, "sku": DUMMY_ITEM, "name": "Test Product"}
+		fake = MagicMock(status_code=200, content=b'{"_id":"x"}')
+		fake.json.return_value = body
+
+		with patch.object(requests, "get", return_value=fake) as mock_get:
+			result = wave_client.get_product_by_sku(
+				base_url=DUMMY_BASE_URL,
+				api_key=DUMMY_API_KEY,
+				app_id=DUMMY_APP_ID,
+				sku=DUMMY_ITEM,
+			)
+
+		self.assertEqual(result, body)
+		args, kwargs = mock_get.call_args
+		self.assertEqual(args[0], f"{DUMMY_BASE_URL}/api/v3/products/by-sku/{DUMMY_ITEM}")
+		self.assertEqual(kwargs["headers"]["X-API-Key"], DUMMY_API_KEY)
+		self.assertEqual(kwargs["headers"]["appId"], DUMMY_APP_ID)
+
+	def test_returns_none_on_200_empty_body(self):
+		"""200 with empty content (Wave's not-found convention) -> None, no exception."""
+		fake = MagicMock(status_code=200, content=b"")
+		fake.text = ""
+		with patch.object(requests, "get", return_value=fake):
+			result = wave_client.get_product_by_sku(
+				base_url=DUMMY_BASE_URL,
+				api_key=DUMMY_API_KEY,
+				app_id=DUMMY_APP_ID,
+				sku="DOES-NOT-EXIST",
+			)
+		self.assertIsNone(result)
+
+	def test_returns_none_on_200_body_without_id(self):
+		"""Defensive: 200 with JSON that has no _id is treated identically to empty body."""
+		fake = MagicMock(status_code=200, content=b'{"oops":"no id here"}')
+		fake.json.return_value = {"oops": "no id here"}
+		with patch.object(requests, "get", return_value=fake):
+			result = wave_client.get_product_by_sku(
+				base_url=DUMMY_BASE_URL,
+				api_key=DUMMY_API_KEY,
+				app_id=DUMMY_APP_ID,
+				sku="STRANGE",
+			)
+		self.assertIsNone(result)
+
+	def test_5xx_raises_outbound_error(self):
+		"""Real HTTP errors (auth, 5xx) still raise — caller distinguishes them from not-found."""
+		fake = MagicMock(status_code=503, text="upstream broken", content=b"upstream broken")
+		fake.json.side_effect = ValueError("not json")
+		with patch.object(requests, "get", return_value=fake):
+			with self.assertRaises(WaveOutboundError) as ctx:
+				wave_client.get_product_by_sku(
+					base_url=DUMMY_BASE_URL,
+					api_key=DUMMY_API_KEY,
+					app_id=DUMMY_APP_ID,
+					sku=DUMMY_ITEM,
+				)
+		self.assertEqual(ctx.exception.http_status, 503)
+
+	def test_empty_sku_rejected_without_http_call(self):
+		"""Empty sku is rejected client-side before any network attempt."""
+		with patch.object(requests, "get") as mock_get:
+			with self.assertRaises(WaveOutboundError):
+				wave_client.get_product_by_sku(
+					base_url=DUMMY_BASE_URL,
+					api_key=DUMMY_API_KEY,
+					app_id=DUMMY_APP_ID,
+					sku="",
+				)
+		mock_get.assert_not_called()
