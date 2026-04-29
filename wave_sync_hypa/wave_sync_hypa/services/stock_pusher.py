@@ -128,7 +128,12 @@ def _push_item_stock_inner(item_code: str, correlation_id: str, batch_id: str | 
 		return
 
 	quantity = _current_default_warehouse_qty(item_code, warehouse)
-	body = {"productId": item_code, "storeId": config["store_id"], "quantity": quantity}
+	# Mirror the JSON body that wave_client.post_stock_sync builds internally so
+	# every log row's request_body matches what actually went over the wire.
+	# Wave's spec requires productId in the body to be the Wave-side `_id`,
+	# matching the {id} path param — sending item_code here would diverge
+	# from the live request and confuse operators reading the audit trail.
+	body = {"productId": wave_product_id, "storeId": config["store_id"], "quantity": quantity}
 
 	if not _attempt_push(item_code, wave_product_id, config, body, correlation_id, batch_id):
 		# First push failed with PRODUCT0006: refresh cached id and retry once.
