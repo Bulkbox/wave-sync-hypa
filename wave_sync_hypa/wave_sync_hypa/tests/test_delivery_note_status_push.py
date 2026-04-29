@@ -208,3 +208,31 @@ class TestDispatchFanOut(FrappeTestCase):
 		mock_enqueue.assert_not_called()
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(order_status.STEP_SKIPPED_NO_WAVE_ID, steps)
+
+	def test_forced_payload_bypasses_resolver(self):
+		"""forced_payload kwarg short-circuits resolver, dispatcher emits the payload as-is."""
+		doc = _dn(items=[])
+		settings = MagicMock()
+		settings.get.side_effect = lambda key, default=None: {
+			"outbound_order_status_sync_enabled": 1,
+		}.get(key, default)
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(
+				order_status.order_status_resolver, "resolve_outbound_payload"
+			) as mock_resolver,
+			patch.object(order_status, "_enqueue_push") as mock_enqueue,
+			patch.object(order_status, "log_step"),
+		):
+			order_status.dispatch_with_wave_order_ids(
+				doc,
+				"credit_note_submit",
+				[WAVE_ID_A],
+				forced_payload={"status": "CANCELLED"},
+			)
+
+		mock_resolver.assert_not_called()
+		mock_enqueue.assert_called_once()
+		# args = (doc.name, event, payload, correlation_id, wave_order_id)
+		self.assertEqual(mock_enqueue.call_args.args[2], {"status": "CANCELLED"})
+		self.assertEqual(mock_enqueue.call_args.args[1], "credit_note_submit")

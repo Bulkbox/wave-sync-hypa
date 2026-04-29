@@ -26,11 +26,18 @@ from __future__ import annotations
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.handlers import order_status
+from wave_sync_hypa.wave_sync_hypa.services import credit_note_classifier
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 
 STEP_STAMP_MULTI_SOURCE = "sales_invoice_wave_order_id_multi_source"
-STEP_SKIPPED_RETURN = "sales_invoice_status_push_skipped_return"
+STEP_SKIPPED_PARTIAL_RETURN = "sales_invoice_status_push_skipped_partial_return"
+STEP_FULL_RETURN_DETECTED = "sales_invoice_full_value_credit_note_detected"
+
+# Event tag used on log rows for credit-note-driven dispatches. Distinct
+# from "submit" so audit dashboards can separate "regular SI submit" from
+# "credit note submit" without having to cross-reference the SI itself.
+EVENT_CREDIT_NOTE_SUBMIT = "credit_note_submit"
 
 
 def stamp_wave_order_id(doc, method=None) -> None:
@@ -66,33 +73,81 @@ def stamp_wave_order_id(doc, method=None) -> None:
 
 
 def on_sales_invoice_submit(doc, method=None) -> None:
-	"""Submit hook: dispatch UNDER_DELIVERY to every linked Wave order.
+	"""Submit hook: route to UNDER_DELIVERY (regular), CANCELLED (full credit), or skip (partial).
 
-	Return invoices (`is_return=1`) are skipped here — the full-value
-	Credit Note -> CANCELLED branch will be added in PR-E. Logging the
-	skip explicitly keeps the audit trail self-explanatory ("we saw the
-	credit note, we just didn't act on it under the current ruleset").
+	Three branches:
+	  * is_return=1 AND credit_note_classifier classifies as full-value:
+	    push CANCELLED to every linked Wave order, tagged with the
+	    `credit_note_submit` event so the audit trail distinguishes this
+	    from a regular SI submit.
+	  * is_return=1 AND not full-value (or unclassifiable):
+	    log STEP_SKIPPED_PARTIAL_RETURN. The Wave order stays at
+	    UNDER_DELIVERY; Phase 8 Payment Entry reconciliation will model
+	    the partial-return -> PAYMENT_PENDING transition.
+	  * is_return=0 (regular invoice):
+	    push UNDER_DELIVERY via the rule resolver, fan out to every
+	    linked wave_order_id.
 	"""
+	wave_ids = _collect_distinct_wave_order_ids(doc)
+	if not wave_ids and doc.get("wave_order_id"):
+		wave_ids = [doc.wave_order_id]
+
 	if doc.get("is_return"):
+		_handle_return(doc, wave_ids)
+		return
+
+	order_status.dispatch_with_wave_order_ids(doc, "submit", wave_ids)
+
+
+def _handle_return(doc, wave_ids: list[str]) -> None:
+	"""Classify a return Sales Invoice and either dispatch CANCELLED or log a partial-return skip."""
+	if credit_note_classifier.is_full_value_credit_note(doc):
 		log_step(
 			correlation_id=new_correlation_id(),
-			step=STEP_SKIPPED_RETURN,
+			step=STEP_FULL_RETURN_DETECTED,
 			level="Info",
 			doc_type=doc.doctype,
 			linked_doctype=doc.doctype,
 			linked_docname=doc.name,
 			wave_id=doc.get("wave_order_id") or None,
+			request_body={
+				"return_against": doc.get("return_against"),
+				"credit_grand_total": float(doc.get("grand_total") or 0),
+				"wave_order_ids": wave_ids,
+			},
 			error_message=(
-				"Sales Invoice is a return (is_return=1); no Wave status push under the "
-				"current ruleset. Full-value Credit Note -> CANCELLED ships in a follow-up PR."
+				"Full-value Credit Note detected; pushing CANCELLED to every linked Wave order."
 			),
+		)
+		order_status.dispatch_with_wave_order_ids(
+			doc,
+			EVENT_CREDIT_NOTE_SUBMIT,
+			wave_ids,
+			forced_payload={"status": "CANCELLED"},
 		)
 		return
 
-	wave_ids = _collect_distinct_wave_order_ids(doc)
-	if not wave_ids and doc.get("wave_order_id"):
-		wave_ids = [doc.wave_order_id]
-	order_status.dispatch_with_wave_order_ids(doc, "submit", wave_ids)
+	# Partial return / unclassifiable return: log + skip. Operator-facing
+	# message names the comparison so triage doesn't need to dig through
+	# code to understand why we didn't push.
+	log_step(
+		correlation_id=new_correlation_id(),
+		step=STEP_SKIPPED_PARTIAL_RETURN,
+		level="Info",
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name,
+		wave_id=doc.get("wave_order_id") or None,
+		request_body={
+			"return_against": doc.get("return_against"),
+			"credit_grand_total": float(doc.get("grand_total") or 0),
+		},
+		error_message=(
+			"Credit Note is a partial return (or could not be classified). "
+			"No Wave status push; the Wave order stays at UNDER_DELIVERY. "
+			"Partial-return -> PAYMENT_PENDING will be modelled by Phase 8 Payment Entry reconciliation."
+		),
+	)
 
 
 def _collect_distinct_wave_order_ids(doc) -> list[str]:
