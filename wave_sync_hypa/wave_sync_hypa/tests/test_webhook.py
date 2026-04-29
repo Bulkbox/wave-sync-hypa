@@ -18,15 +18,23 @@ class TestReceive(FrappeTestCase):
 	"""The endpoint must auth with x-api-key, log, enqueue, and return 200 — never run a handler inline."""
 
 	def setUp(self):
-		"""Enable the integration with a known API key and capture the baseline for restore."""
+		"""Enable the integration with a known API key and capture the baseline for restore.
+
+		Snapshots the operator-configured inbound_api_key first so tearDown
+		can put it back — without this the suite leaves the live site with
+		this test's "phase2-test-secret" placeholder, breaking real webhook
+		auth for everyone until somebody re-rotates the key by hand.
+		"""
+		live = frappe.get_single("Wave Settings")
 		self._baseline = {
 			"enabled": frappe.db.get_single_value("Wave Settings", "enabled") or 0,
+			"inbound_api_key": live.get_password("inbound_api_key", raise_exception=False) or "",
 		}
 		self._set_key(KEY)
 		self._enable()
 
 	def tearDown(self):
-		"""Restore baseline enabled flag and clean up any logs written by tests."""
+		"""Restore the operator's enabled flag + inbound_api_key, and clean up any logs written by tests."""
 		frappe.db.set_value(
 			"Wave Settings",
 			"Wave Settings",
@@ -34,9 +42,23 @@ class TestReceive(FrappeTestCase):
 			self._baseline["enabled"],
 			update_modified=False,
 		)
+		self._restore_inbound_api_key()
 		frappe.db.commit()
 		frappe.clear_document_cache("Wave Settings", "Wave Settings")
 		self._cleanup_logs()
+
+	def _restore_inbound_api_key(self) -> None:
+		"""Write the snapshotted inbound_api_key cleartext back via Frappe's encrypted-set primitive."""
+		from frappe.utils.password import remove_encrypted_password, set_encrypted_password
+
+		remove_encrypted_password("Wave Settings", "Wave Settings", "inbound_api_key")
+		if self._baseline["inbound_api_key"]:
+			set_encrypted_password(
+				"Wave Settings",
+				"Wave Settings",
+				self._baseline["inbound_api_key"],
+				"inbound_api_key",
+			)
 
 	def _set_key(self, key: str) -> None:
 		"""Write the inbound API key via the ORM so Password encryption is applied."""

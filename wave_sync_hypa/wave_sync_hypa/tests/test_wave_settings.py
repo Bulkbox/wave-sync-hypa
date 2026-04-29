@@ -1,4 +1,18 @@
-"""Unit tests for the Wave Settings controller."""
+"""Unit tests for the Wave Settings controller.
+
+Test isolation note: this suite mutates the live `Wave Settings` Single
+on the running site (no separate test site exists today). Without
+explicit snapshot/restore, every test run leaves behind whatever the
+last alphabetical test set — historically that meant `inbound_api_key`
+flipping to `"E"*32`, `route_rules` getting wiped to zero, etc.
+
+setUp now captures EVERY field a test in this file might mutate, plus
+`route_rules` rows; tearDown writes them back exactly. The snapshot
+covers:
+  - scalar fields (enabled, price_scale_divisor, log_retention_days)
+  - the encrypted `inbound_api_key` (via get_password)
+  - the entire `route_rules` child table (saved as dict snapshots)
+"""
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -8,7 +22,8 @@ class TestWaveSettings(FrappeTestCase):
 	"""Invariants enforced by WaveSettings.validate."""
 
 	def setUp(self):
-		"""Snapshot current values via direct DB reads and set a known-good baseline."""
+		"""Snapshot every field this suite mutates so tearDown can restore the live config bit-for-bit."""
+		live = frappe.get_single("Wave Settings")
 		self._baseline = {
 			"enabled": frappe.db.get_single_value("Wave Settings", "enabled") or 0,
 			"price_scale_divisor": frappe.db.get_single_value(
@@ -18,17 +33,69 @@ class TestWaveSettings(FrappeTestCase):
 				"Wave Settings", "log_retention_days"
 			) or 14,
 		}
+		self._baseline_inbound_api_key = (
+			live.get_password("inbound_api_key", raise_exception=False) or ""
+		)
+		# Snapshot every route_rule row (only the fields we care about).
+		self._baseline_route_rules = [
+			{
+				"enabled": int(r.enabled or 0),
+				"doc_type": r.doc_type,
+				"action": r.action,
+				"handler_key": r.handler_key,
+			}
+			for r in (live.get("route_rules") or [])
+		]
 		self._write_fields(enabled=0, price_scale_divisor=100, log_retention_days=14)
 		self.settings = frappe.get_single("Wave Settings")
 
 	def tearDown(self):
-		"""Restore the snapshot directly via DB writes; validate() is exercised by the tests, not fixtures."""
+		"""Restore EVERY snapshotted value so the next test (and any operator opening the doc) sees the original config."""
 		self._write_fields(**self._baseline)
+		# Restore inbound_api_key via the encrypted store directly. Bypass
+		# our validate() since we're rolling back, not enforcing.
+		self._restore_inbound_api_key()
+		# Restore route_rules rows by direct child-table SQL: avoids
+		# re-running validate / before_save / on_update on a half-formed
+		# settings doc.
+		self._restore_route_rules()
 
 	def _write_fields(self, **fields) -> None:
 		"""Persist Wave Settings fields via direct DB writes to bypass validate() in fixture lifecycle."""
 		for name, value in fields.items():
 			frappe.db.set_value("Wave Settings", "Wave Settings", name, value, update_modified=False)
+		frappe.db.commit()
+
+	def _restore_inbound_api_key(self) -> None:
+		"""Write the snapshotted inbound_api_key cleartext back to __Auth via Frappe's encrypted-set primitive."""
+		from frappe.utils.password import remove_encrypted_password, set_encrypted_password
+
+		remove_encrypted_password("Wave Settings", "Wave Settings", "inbound_api_key")
+		if self._baseline_inbound_api_key:
+			set_encrypted_password(
+				"Wave Settings",
+				"Wave Settings",
+				self._baseline_inbound_api_key,
+				"inbound_api_key",
+			)
+		frappe.db.commit()
+
+	def _restore_route_rules(self) -> None:
+		"""Replace the route_rules child table with the setUp snapshot via direct SQL inserts."""
+		frappe.db.sql("DELETE FROM `tabWave Route Rule` WHERE parent='Wave Settings'")
+		for idx, row in enumerate(self._baseline_route_rules):
+			child = frappe.get_doc(
+				{
+					"doctype": "Wave Route Rule",
+					"parent": "Wave Settings",
+					"parenttype": "Wave Settings",
+					"parentfield": "route_rules",
+					"idx": idx + 1,
+					**row,
+				}
+			)
+			child.flags.ignore_links = True
+			child.insert(ignore_permissions=True)
 		frappe.db.commit()
 
 	def test_price_scale_divisor_must_be_positive(self):
@@ -184,16 +251,26 @@ class TestWaveSettings(FrappeTestCase):
 		settings.inbound_api_key = "E" * 32
 		settings.save(ignore_permissions=True)
 
-	def test_framework_driven_save_preserves_existing_child_rows(self):
-		"""During in_migrate, an empty in-memory child table must NOT wipe DB rows.
+	def _route_rule_count(self) -> int:
+		"""Count Wave Route Rule rows currently parented under Wave Settings."""
+		return frappe.db.count(
+			"Wave Route Rule",
+			filters={"parent": "Wave Settings", "parenttype": "Wave Settings"},
+		)
 
-		Regression cover for the route-rules-disappear-on-migrate report:
-		bench migrate triggered Wave Settings saves with empty in-memory
-		route_rules and Frappe's save pipeline DELETEd every row. The
-		audit trail caught it but the data was gone. This test pins the
-		before_save guard that repopulates the in-memory table from DB
-		whenever a framework-driven save lands without children loaded.
+	def test_save_with_empty_in_memory_child_table_preserves_db_rows(self):
+		"""ANY save with empty in-memory child rows must NOT wipe DB rows — always-protect default.
+
+		Regression cover for the route-rules-disappear bug. Three causes
+		hit this same code path:
+		  (1) bench migrate / install / patch with an unloaded Single
+		  (2) test runs that deliberately blank the table for assertions
+		  (3) a buggy form post that doesn't include the rows
+		All three are now defended by the same guard. To genuinely clear a
+		table the caller must opt in via `flags.allow_child_table_clear`.
 		"""
+		baseline_count = self._route_rule_count()
+		# Seed one extra rule via a normal save.
 		self.settings.enabled = 1
 		self.settings.inbound_api_key = "G" * 32
 		self.settings.append("route_rules", {
@@ -205,33 +282,27 @@ class TestWaveSettings(FrappeTestCase):
 		self.settings.flags.ignore_links = True
 		self.settings.save(ignore_permissions=True)
 
-		seeded = frappe.db.count(
-			"Wave Route Rule",
-			filters={"parent": "Wave Settings", "parenttype": "Wave Settings"},
-		)
-		self.assertEqual(seeded, 1)
+		# Save protection means the seeded rule + every pre-existing baseline
+		# row survive together.
+		seeded = self._route_rule_count()
+		self.assertGreaterEqual(seeded, baseline_count + 1)
 
-		# Simulate the migrate-time save: load fresh, drop the child rows
-		# from in-memory state, flip in_migrate, save. Without the guard
-		# the DB rows would be DELETEd.
+		# Plain UI-style save with empty in-memory rows — must NOT wipe DB.
 		reloaded = frappe.get_single("Wave Settings")
 		reloaded.route_rules = []
+		reloaded.save(ignore_permissions=True)
 
-		original = frappe.flags.in_migrate
-		frappe.flags.in_migrate = True
-		try:
-			reloaded.save(ignore_permissions=True)
-		finally:
-			frappe.flags.in_migrate = original
+		surviving = self._route_rule_count()
+		self.assertEqual(surviving, seeded)
 
-		surviving = frappe.db.count(
-			"Wave Route Rule",
-			filters={"parent": "Wave Settings", "parenttype": "Wave Settings"},
-		)
-		self.assertEqual(surviving, 1)
+	def test_explicit_allow_child_table_clear_flag_actually_clears(self):
+		"""Setting `flags.allow_child_table_clear=True` opts out of protection — operator-driven clear works.
 
-	def test_ui_save_with_cleared_child_table_honours_operator_intent(self):
-		"""A real UI save (no in_migrate flag) with empty children must wipe the rows — operator intent."""
+		The escape hatch exists for SQL admins / scripts that genuinely
+		need to wipe a table. Operators using the form to delete individual
+		rows aren't affected (each deletion + save still leaves the other
+		rows). This test pins the explicit opt-in path.
+		"""
 		self.settings.enabled = 1
 		self.settings.inbound_api_key = "H" * 32
 		self.settings.append("route_rules", {
@@ -245,13 +316,10 @@ class TestWaveSettings(FrappeTestCase):
 
 		reloaded = frappe.get_single("Wave Settings")
 		reloaded.route_rules = []
+		reloaded.flags.allow_child_table_clear = True
 		reloaded.save(ignore_permissions=True)
 
-		surviving = frappe.db.count(
-			"Wave Route Rule",
-			filters={"parent": "Wave Settings", "parenttype": "Wave Settings"},
-		)
-		self.assertEqual(surviving, 0)
+		self.assertEqual(self._route_rule_count(), 0)
 
 	def test_post_save_audit_row_records_child_table_counts(self):
 		"""Every Wave Settings save writes one Wave Sync Log row with the child-table head count.

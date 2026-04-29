@@ -45,13 +45,30 @@ class TestResolveHandler(FrappeTestCase):
 		frappe.clear_document_cache("Wave Settings", "Wave Settings")
 
 	def _restore_rules(self, rows: list[dict]) -> None:
-		"""Replace route_rules with the provided rows via the ORM so child-links reattach cleanly."""
-		settings = frappe.get_single("Wave Settings")
-		settings.route_rules = []
-		for row in rows:
-			settings.append("route_rules", row)
-		settings.flags.ignore_validate = True
-		settings.save(ignore_permissions=True)
+		"""Replace route_rules with the provided rows via direct child-table SQL.
+
+		Direct SQL + explicit commit is required so the restoration survives
+		FrappeTestCase's class-level `_rollback_db` cleanup. A controller-
+		level `settings.save(...)` writes within the test's connection
+		transaction; without an explicit commit, that work is rolled back at
+		test teardown and every subsequent test in this run sees an empty
+		route_rules table — leaking the test wipe into the live site.
+		"""
+		frappe.db.delete("Wave Route Rule", {"parent": "Wave Settings"})
+		for idx, row in enumerate(rows):
+			child = frappe.get_doc(
+				{
+					"doctype": "Wave Route Rule",
+					"parent": "Wave Settings",
+					"parenttype": "Wave Settings",
+					"parentfield": "route_rules",
+					"idx": idx + 1,
+					**row,
+				}
+			)
+			child.flags.ignore_links = True
+			child.insert(ignore_permissions=True)
+		frappe.db.commit()
 		frappe.clear_document_cache("Wave Settings", "Wave Settings")
 
 	def _add_rule(self, doc_type: str, action: str, handler_key: str, enabled: int = 1) -> None:

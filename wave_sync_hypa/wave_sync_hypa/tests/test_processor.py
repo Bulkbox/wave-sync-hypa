@@ -11,10 +11,16 @@ class TestProcessWebhook(FrappeTestCase):
 	"""Assert the processor logs the right outcome for each dispatch path."""
 
 	def setUp(self):
-		"""Unique correlation id per test, fresh registry stub, empty route_rules."""
+		"""Unique correlation id per test, fresh registry stub, empty route_rules.
+
+		Snapshots the operator-configured route_rules first so tearDown can
+		restore them — without this the suite leaves the live site with an
+		empty route_rules table after every run.
+		"""
 		self.correlation_id = frappe.generate_hash(length=16)
 		self.wave_id = frappe.generate_hash(length=12)
 		self.updated_at = "1776753292987"
+		self._original_rules = self._snapshot_rules()
 		self._clear_rules()
 		dispatcher._ensure_handlers_loaded()
 		self._original_handler = dispatcher.HANDLER_REGISTRY.get("customer_upsert")
@@ -22,17 +28,49 @@ class TestProcessWebhook(FrappeTestCase):
 		dispatcher.HANDLER_REGISTRY["customer_upsert"] = self._record_handler
 
 	def tearDown(self):
-		"""Restore registry, wipe logs created under this correlation id, clear rules."""
+		"""Restore registry, wipe test-only logs, restore the operator's route_rules."""
 		dispatcher.HANDLER_REGISTRY["customer_upsert"] = self._original_handler
 		for name in frappe.get_all(
 			"Wave Sync Log", filters={"correlation_id": self.correlation_id}, pluck="name"
 		):
 			frappe.delete_doc("Wave Sync Log", name, ignore_permissions=True, delete_permanently=True)
-		self._clear_rules()
+		self._restore_rules(self._original_rules)
+
+	def _snapshot_rules(self) -> list[dict]:
+		"""Capture current route_rules as plain dicts for verbatim restore."""
+		settings = frappe.get_single("Wave Settings")
+		return [
+			{
+				"doc_type": row.doc_type,
+				"action": row.action,
+				"handler_key": row.handler_key,
+				"enabled": int(row.enabled or 0),
+			}
+			for row in (settings.route_rules or [])
+		]
 
 	def _clear_rules(self) -> None:
 		"""Drop every route_rules row via direct DB writes."""
 		frappe.db.delete("Wave Route Rule", {"parent": "Wave Settings"})
+		frappe.db.commit()
+		frappe.clear_document_cache("Wave Settings", "Wave Settings")
+
+	def _restore_rules(self, rows: list[dict]) -> None:
+		"""Re-insert the snapshotted route_rules verbatim via direct child-table SQL."""
+		frappe.db.delete("Wave Route Rule", {"parent": "Wave Settings"})
+		for idx, row in enumerate(rows):
+			child = frappe.get_doc(
+				{
+					"doctype": "Wave Route Rule",
+					"parent": "Wave Settings",
+					"parenttype": "Wave Settings",
+					"parentfield": "route_rules",
+					"idx": idx + 1,
+					**row,
+				}
+			)
+			child.flags.ignore_links = True
+			child.insert(ignore_permissions=True)
 		frappe.db.commit()
 		frappe.clear_document_cache("Wave Settings", "Wave Settings")
 
