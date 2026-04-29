@@ -31,6 +31,24 @@ class WaveResolutionError(WaveSyncError):
 
 
 class WaveOutboundError(WaveSyncError):
-	"""Raised when an outbound call to the Wave API fails."""
+	"""Raised when an outbound call to the Wave API fails.
 
-	pass
+	Carries enough structured context for callers to branch on Wave's
+	application-level error code (e.g. PRODUCT0006 for a stale product id,
+	ORDER0049 for a forbidden state transition) without having to grep
+	error message strings. wave_code is set when the Wave response body
+	parsed as JSON and contained a `code` field; otherwise None.
+	"""
+
+	def __init__(
+		self,
+		message: str,
+		*,
+		http_status: int | None = None,
+		wave_code: str | None = None,
+		response_text: str | None = None,
+	) -> None:
+		super().__init__(message)
+		self.http_status = http_status
+		self.wave_code = wave_code
+		self.response_text = response_text

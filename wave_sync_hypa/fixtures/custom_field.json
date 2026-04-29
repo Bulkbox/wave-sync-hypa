@@ -248,5 +248,23 @@
   "read_only": 1,
   "search_index": 1,
   "translatable": 0
+ },
+ {
+  "description": "Wave-side product `_id` resolved by Wave Sync via GET /products/by-sku/{item_code}. Populated automatically on first stock push; refreshed automatically if Wave returns PRODUCT0006 for a stale id. Operators normally do not edit this.",
+  "doctype": "Custom Field",
+  "dt": "Item",
+  "fieldname": "wave_product_id",
+  "fieldtype": "Data",
+  "hidden": 0,
+  "ignore_user_permissions": 0,
+  "in_standard_filter": 1,
+  "insert_after": "item_code",
+  "label": "Wave Product ID",
+  "modified": "2026-04-29 00:00:00",
+  "name": "Item-wave_product_id",
+  "no_copy": 1,
+  "read_only": 1,
+  "search_index": 1,
+  "translatable": 0
  }
 ]

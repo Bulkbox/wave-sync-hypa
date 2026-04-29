@@ -15,6 +15,40 @@ from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 DEFAULT_TIMEOUT_SECONDS = 10
 
 
+def _raise_for_response(response: requests.Response, what: str) -> None:
+	"""Convert a non-2xx Wave response into a structured WaveOutboundError.
+
+	Wave's REST API consistently returns errors in the shape
+	`{"code": "PRODUCT0006", "userTitle": "...", "userMessage": "...", ...}`.
+	Parse that envelope when possible and attach the `code` to the exception
+	so callers can branch on it (e.g. retry on PRODUCT0006, soft-skip on
+	ORDER0049). Falls back to None when the body isn't JSON.
+	"""
+	if 200 <= response.status_code < 300:
+		return
+	body = _safe_text(response)
+	wave_code = _extract_wave_code(response)
+	raise WaveOutboundError(
+		f"Wave {what} returned HTTP {response.status_code}: {body}",
+		http_status=response.status_code,
+		wave_code=wave_code,
+		response_text=body,
+	)
+
+
+def _extract_wave_code(response: requests.Response) -> str | None:
+	"""Best-effort: pull the `code` field out of Wave's JSON error envelope."""
+	try:
+		payload = response.json()
+	except ValueError:
+		return None
+	if isinstance(payload, dict):
+		code = payload.get("code")
+		if isinstance(code, str) and code:
+			return code
+	return None
+
+
 def post_stock_sync(
 	*,
 	base_url: str,
@@ -46,11 +80,7 @@ def post_stock_sync(
 	except requests.RequestException as exc:
 		raise WaveOutboundError(f"network error calling Wave stock/sync: {exc}") from exc
 
-	if not (200 <= response.status_code < 300):
-		raise WaveOutboundError(
-			f"Wave stock/sync returned HTTP {response.status_code}: {_safe_text(response)}"
-		)
-
+	_raise_for_response(response, "stock/sync")
 	return _parse_json(response)
 
 
@@ -94,12 +124,57 @@ def post_order_status(
 	except requests.RequestException as exc:
 		raise WaveOutboundError(f"network error calling Wave order status: {exc}") from exc
 
-	if not (200 <= response.status_code < 300):
-		raise WaveOutboundError(
-			f"Wave order status returned HTTP {response.status_code}: {_safe_text(response)}"
-		)
-
+	_raise_for_response(response, "order status")
 	return _parse_json(response)
+
+
+def get_product_by_sku(
+	*,
+	base_url: str,
+	api_key: str,
+	app_id: str,
+	sku: str,
+	timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict | None:
+	"""GET a Wave product by sku; return its parsed body or None when Wave reports not-found.
+
+	Wave's contract for this endpoint is unusual: an unknown sku returns
+	HTTP 200 with an empty body (Content-Length: 0), not a 404. Callers
+	that need to distinguish 'product exists' from 'product missing'
+	therefore cannot rely on status code alone, so this helper centralises
+	the contract:
+
+	  - 2xx with parseable body containing `_id` -> return the dict
+	  - 2xx with empty body OR no `_id`          -> return None
+	  - any other status                         -> raise WaveOutboundError
+
+	The resolver layer maps None to a `product_resolve_not_found` audit
+	row (operator alert) without having to inspect HTTP status itself.
+	"""
+	if not base_url:
+		raise WaveOutboundError("Wave API base URL is not configured.")
+	if not api_key:
+		raise WaveOutboundError("Wave API key is not configured.")
+	if not app_id:
+		raise WaveOutboundError("Wave App ID is not configured.")
+	if not sku:
+		raise WaveOutboundError("sku is required.")
+
+	url = _build_product_by_sku_url(base_url, sku)
+	headers = _build_status_headers(api_key, app_id)
+
+	try:
+		response = requests.get(url, headers=headers, timeout=timeout)
+	except requests.RequestException as exc:
+		raise WaveOutboundError(f"network error calling Wave product by-sku: {exc}") from exc
+
+	_raise_for_response(response, "product by-sku")
+	if not response.content:
+		return None
+	body = _parse_json(response)
+	if not isinstance(body, dict) or not body.get("_id"):
+		return None
+	return body
 
 
 def _build_stock_sync_url(base_url: str, product_id: str) -> str:
@@ -110,6 +185,11 @@ def _build_stock_sync_url(base_url: str, product_id: str) -> str:
 def _build_order_status_url(base_url: str, order_id: str, status_name: str) -> str:
 	"""Compose the path-keyed order-status URL per Wave's spec."""
 	return f"{base_url.rstrip('/')}/api/v3/admin/orders/{order_id}/status/{status_name}"
+
+
+def _build_product_by_sku_url(base_url: str, sku: str) -> str:
+	"""Compose the by-sku product lookup URL per Wave's spec."""
+	return f"{base_url.rstrip('/')}/api/v3/products/by-sku/{sku}"
 
 
 def _build_headers(api_key: str, app_id: str) -> dict:
