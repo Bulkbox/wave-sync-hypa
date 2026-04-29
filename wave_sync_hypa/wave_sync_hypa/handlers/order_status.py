@@ -50,7 +50,13 @@ def _dispatch(doc, event: str) -> None:
 	dispatch_with_wave_order_ids(doc, event, [wave_order_id] if wave_order_id else [])
 
 
-def dispatch_with_wave_order_ids(doc, event: str, wave_order_ids: list[str]) -> None:
+def dispatch_with_wave_order_ids(
+	doc,
+	event: str,
+	wave_order_ids: list[str],
+	*,
+	forced_payload: dict | None = None,
+) -> None:
 	"""Resolve rules once for this (doctype, event) and enqueue one push per wave_order_id.
 
 	Single correlation_id covers the whole emit so all log rows for the
@@ -62,6 +68,14 @@ def dispatch_with_wave_order_ids(doc, event: str, wave_order_ids: list[str]) -> 
 	items belonging to several Wave-sourced Sales Orders. Each leg becomes
 	an independent worker job so a transient failure on one Wave order
 	doesn't block the others.
+
+	`forced_payload` lets callers bypass the rule resolver when the desired
+	transition cannot be expressed as a (doctype, event, condition) row —
+	for example, "Sales Invoice with is_return=1 AND grand_total matches the
+	original invoice within 1 cent" requires comparing two documents, which
+	the rule schema can't model. The caller computes the payload itself and
+	passes it in. The skip semantics for disabled / no-wave-id remain in
+	effect; only the resolver step is bypassed.
 	"""
 	correlation_id = new_correlation_id()
 	settings = frappe.get_cached_doc("Wave Settings")
@@ -92,20 +106,23 @@ def dispatch_with_wave_order_ids(doc, event: str, wave_order_ids: list[str]) -> 
 		)
 		return
 
-	payload = order_status_resolver.resolve_outbound_payload(doc, event, settings)
-	if not payload:
-		log_step(
-			correlation_id=correlation_id,
-			step=STEP_SKIPPED_NO_RULE,
-			level="Info",
-			doc_type=doc.doctype,
-			action=event,
-			linked_doctype=doc.doctype,
-			linked_docname=doc.name,
-			wave_id=wave_order_ids[0] if len(wave_order_ids) == 1 else None,
-			error_message=f"No enabled outbound status rule matched ({doc.doctype}, {event}).",
-		)
-		return
+	if forced_payload is None:
+		payload = order_status_resolver.resolve_outbound_payload(doc, event, settings)
+		if not payload:
+			log_step(
+				correlation_id=correlation_id,
+				step=STEP_SKIPPED_NO_RULE,
+				level="Info",
+				doc_type=doc.doctype,
+				action=event,
+				linked_doctype=doc.doctype,
+				linked_docname=doc.name,
+				wave_id=wave_order_ids[0] if len(wave_order_ids) == 1 else None,
+				error_message=f"No enabled outbound status rule matched ({doc.doctype}, {event}).",
+			)
+			return
+	else:
+		payload = forced_payload
 
 	for wave_order_id in wave_order_ids:
 		_enqueue_push(doc.name, event, payload, correlation_id, wave_order_id)

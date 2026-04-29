@@ -1,12 +1,13 @@
-"""Unit tests for the Sales Invoice status-push pipeline (regular invoices only).
+"""Unit tests for the Sales Invoice status-push pipeline.
 
-The credit-note CANCELLED branch ships in a follow-up PR. Tests here pin:
+Three concerns covered:
 
   1. stamp_wave_order_id walks SI items via sales_order first, then
      delivery_note as fallback.
-  2. on_sales_invoice_submit fans out to every distinct wave_order_id.
-  3. Return invoices (is_return=1) are skipped explicitly with a clear
-     audit row.
+  2. on_sales_invoice_submit fans out UNDER_DELIVERY for regular invoices.
+  3. on_sales_invoice_submit routes return invoices through the credit-note
+     classifier — full-value -> CANCELLED via forced payload, partial /
+     unclassifiable -> STEP_SKIPPED_PARTIAL_RETURN.
 """
 
 from __future__ import annotations
@@ -24,9 +25,22 @@ WAVE_ID_A = "wave-id-aaa"
 WAVE_ID_B = "wave-id-bbb"
 
 
-def _si(items, wave_order_id="", is_return=0, name="SI-2026-0001") -> SimpleNamespace:
+def _si(
+	items,
+	wave_order_id="",
+	is_return=0,
+	return_against="",
+	grand_total=0.0,
+	name="SI-2026-0001",
+) -> SimpleNamespace:
 	doc = SimpleNamespace(doctype="Sales Invoice", name=name, wave_order_id=wave_order_id)
-	values = {"wave_order_id": wave_order_id, "items": items, "is_return": is_return}
+	values = {
+		"wave_order_id": wave_order_id,
+		"items": items,
+		"is_return": is_return,
+		"return_against": return_against,
+		"grand_total": grand_total,
+	}
 
 	def _get(key, default=None):
 		return values.get(key, default)
@@ -140,15 +154,52 @@ class TestOnSalesInvoiceSubmit(FrappeTestCase):
 		mock_dispatch.assert_called_once()
 		self.assertEqual(mock_dispatch.call_args.args[2], [WAVE_ID_A])
 
-	def test_return_invoice_is_skipped_with_audit_row(self):
-		"""is_return=1 -> never call the dispatcher, emit STEP_SKIPPED_RETURN."""
+	def test_full_value_credit_note_dispatches_cancelled_with_credit_note_event(self):
+		"""is_return=1 + classifier says full-value -> dispatch CANCELLED with credit_note_submit event."""
 		doc = _si(
 			items=[_item(sales_order="SO-001")],
 			wave_order_id=WAVE_ID_A,
 			is_return=1,
+			return_against="SI-ORIG",
+			grand_total=-1234.56,
 		)
 		with (
 			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(
+				si_handler.credit_note_classifier,
+				"is_full_value_credit_note",
+				return_value=True,
+			) as mock_classifier,
+			patch.object(order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
+			patch.object(si_handler, "log_step") as mock_log,
+		):
+			si_handler.on_sales_invoice_submit(doc)
+
+		mock_classifier.assert_called_once_with(doc)
+		mock_dispatch.assert_called_once()
+		args, kwargs = mock_dispatch.call_args
+		self.assertEqual(args[1], si_handler.EVENT_CREDIT_NOTE_SUBMIT)
+		self.assertEqual(args[2], [WAVE_ID_A])
+		self.assertEqual(kwargs.get("forced_payload"), {"status": "CANCELLED"})
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(si_handler.STEP_FULL_RETURN_DETECTED, steps)
+
+	def test_partial_credit_note_skips_with_partial_return_step(self):
+		"""is_return=1 + classifier says partial -> log STEP_SKIPPED_PARTIAL_RETURN, no dispatch."""
+		doc = _si(
+			items=[_item(sales_order="SO-001")],
+			wave_order_id=WAVE_ID_A,
+			is_return=1,
+			return_against="SI-ORIG",
+			grand_total=-100.00,  # partial value
+		)
+		with (
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(
+				si_handler.credit_note_classifier,
+				"is_full_value_credit_note",
+				return_value=False,
+			),
 			patch.object(order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
 			patch.object(si_handler, "log_step") as mock_log,
 		):
@@ -156,7 +207,32 @@ class TestOnSalesInvoiceSubmit(FrappeTestCase):
 
 		mock_dispatch.assert_not_called()
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
-		self.assertIn(si_handler.STEP_SKIPPED_RETURN, steps)
+		self.assertIn(si_handler.STEP_SKIPPED_PARTIAL_RETURN, steps)
+
+	def test_return_invoice_with_no_return_against_skips_as_partial(self):
+		"""Malformed return (is_return=1 but no return_against): classifier returns False -> partial path."""
+		doc = _si(
+			items=[_item(sales_order="SO-001")],
+			wave_order_id=WAVE_ID_A,
+			is_return=1,
+			return_against="",
+			grand_total=-50.0,
+		)
+		with (
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(
+				si_handler.credit_note_classifier,
+				"is_full_value_credit_note",
+				return_value=False,
+			),
+			patch.object(order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
+			patch.object(si_handler, "log_step") as mock_log,
+		):
+			si_handler.on_sales_invoice_submit(doc)
+
+		mock_dispatch.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(si_handler.STEP_SKIPPED_PARTIAL_RETURN, steps)
 
 	def test_dispatches_empty_list_when_si_is_not_wave_linked(self):
 		"""Non-Wave SI: dispatcher invoked with [], will log SKIPPED_NO_WAVE_ID itself."""
