@@ -188,7 +188,11 @@ class TestHandler(FrappeTestCase):
 			handler.on_sales_order_submit(_so_doc())
 		mock_enqueue.assert_called_once()
 		kwargs = mock_enqueue.call_args.kwargs
-		self.assertEqual(kwargs["sales_order_name"], DUMMY_SO)
+		# Source-doc identity plumbed through so the worker logs the actual
+		# triggering doc on its log rows (not a hardcoded "Sales Order" assumption).
+		self.assertEqual(kwargs["source_doctype"], "Sales Order")
+		self.assertEqual(kwargs["source_docname"], DUMMY_SO)
+		self.assertEqual(kwargs["wave_order_id"], DUMMY_WAVE_ORDER_ID)
 		# Worker function expects `erp_event`, not `event` — `event` is a
 		# reserved kwarg in frappe.enqueue's signature and would be eaten
 		# before reaching the worker.
@@ -202,6 +206,19 @@ class TestHandler(FrappeTestCase):
 		)
 
 
+def _push(*, payload=None, event="submit", correlation_id="corr-x", source_doctype="Sales Order",
+          source_docname=DUMMY_SO, wave_order_id=DUMMY_WAVE_ORDER_ID):
+	"""Wrapper that calls the worker with the structured kwargs the dispatcher now plumbs."""
+	order_status_pusher.push_order_status(
+		source_doctype=source_doctype,
+		source_docname=source_docname,
+		erp_event=event,
+		payload=payload or {},
+		correlation_id=correlation_id,
+		wave_order_id=wave_order_id,
+	)
+
+
 class TestWorker(FrappeTestCase):
 	"""Worker job: HTTP shape + log emission + defensive catches."""
 
@@ -209,11 +226,10 @@ class TestWorker(FrappeTestCase):
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
 			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={"ok": True}) as mock_post,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-1")
+			_push(payload={"status": "ACCEPTED"}, correlation_id="corr-1")
 		mock_post.assert_called_once_with(
 			base_url=DUMMY_BASE_URL,
 			api_key=DUMMY_API_KEY,
@@ -225,11 +241,39 @@ class TestWorker(FrappeTestCase):
 		self.assertIn(order_status_pusher.STEP_PUSH_ATTEMPT, steps)
 		self.assertIn(order_status_pusher.STEP_PUSH_SUCCESS, steps)
 
+	def test_log_rows_carry_source_doctype_for_dn_dispatch(self):
+		"""When the dispatch came from a Delivery Note, log rows must reference Delivery Note (not Sales Order).
+
+		Regression cover for the Dynamic Link validation failure: Wave Sync
+		Log's linked_docname is a Dynamic Link via linked_doctype, so logging
+		linked_doctype='Sales Order' with linked_docname='MAT-DN-2026-00005'
+		fails validation and silently swallows every audit row. The fix
+		plumbs source_doctype through the dispatcher so all log rows carry
+		the actual triggering doctype.
+		"""
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={}),
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			_push(
+				payload={"status": "INVOICING"},
+				correlation_id="corr-dn",
+				source_doctype="Delivery Note",
+				source_docname="MAT-DN-2026-00005",
+				event="submit",
+			)
+		# Every log row from this dispatch must point at the Delivery Note.
+		for call in mock_log.call_args_list:
+			self.assertEqual(call.kwargs.get("linked_doctype"), "Delivery Note")
+			self.assertEqual(call.kwargs.get("linked_docname"), "MAT-DN-2026-00005")
+			self.assertEqual(call.kwargs.get("doc_type"), "Delivery Note")
+
 	def test_logs_failed_on_outbound_error_and_swallows(self):
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
 			patch.object(
 				order_status_pusher.wave_client,
 				"post_order_status",
@@ -237,23 +281,16 @@ class TestWorker(FrappeTestCase):
 			),
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-2")
+			_push(payload={"status": "ACCEPTED"}, correlation_id="corr-2")
 		failures = [c for c in mock_log.call_args_list if c.kwargs.get("step") == order_status_pusher.STEP_PUSH_FAILED]
 		self.assertEqual(len(failures), 1)
 		self.assertEqual(failures[0].kwargs.get("level"), "Error")
 
 	def test_soft_skips_terminal_state_when_wave_returns_ORDER0049(self):
-		"""ORDER0049 (forbidden transition) -> Warning + STEP_PUSH_SKIPPED_TERMINAL, not Error.
-
-		Drives the amend / re-submit case: ERP fires submit on an SO whose Wave
-		counterpart already moved past ACCEPTED. Without this classification
-		the ambient Error rate spikes whenever an order is amended, drowning
-		real failures in noise.
-		"""
+		"""ORDER0049 (forbidden transition) -> Warning + STEP_PUSH_SKIPPED_TERMINAL, not Error."""
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
 			patch.object(
 				order_status_pusher.wave_client,
 				"post_order_status",
@@ -265,7 +302,7 @@ class TestWorker(FrappeTestCase):
 			),
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-0049")
+			_push(payload={"status": "ACCEPTED"}, correlation_id="corr-0049")
 
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(order_status_pusher.STEP_PUSH_SKIPPED_TERMINAL, steps)
@@ -275,16 +312,14 @@ class TestWorker(FrappeTestCase):
 			if c.kwargs.get("step") == order_status_pusher.STEP_PUSH_SKIPPED_TERMINAL
 		]
 		self.assertEqual(skipped[0].kwargs.get("level"), "Warning")
-		# stack_trace is suppressed on soft-skips — terminal-state rejections
-		# carry no useful traceback (the failure is on Wave's side).
+		# Soft-skip rows carry no traceback — Wave-side rejection has nothing useful to log.
 		self.assertIsNone(skipped[0].kwargs.get("stack_trace"))
 
 	def test_soft_skips_terminal_state_when_wave_returns_ORDER0034(self):
-		"""ORDER0034 (unauthorized — order already terminal) is treated identically to ORDER0049."""
+		"""ORDER0034 is treated identically to ORDER0049."""
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
 			patch.object(
 				order_status_pusher.wave_client,
 				"post_order_status",
@@ -296,7 +331,7 @@ class TestWorker(FrappeTestCase):
 			),
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(DUMMY_SO, "cancel", {"status": "CANCELLED"}, "corr-0034")
+			_push(payload={"status": "CANCELLED"}, event="cancel", correlation_id="corr-0034")
 
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(order_status_pusher.STEP_PUSH_SKIPPED_TERMINAL, steps)
@@ -307,7 +342,6 @@ class TestWorker(FrappeTestCase):
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
 			patch.object(
 				order_status_pusher.wave_client,
 				"post_order_status",
@@ -319,7 +353,7 @@ class TestWorker(FrappeTestCase):
 			),
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-unknown-422")
+			_push(payload={"status": "ACCEPTED"}, correlation_id="corr-unknown-422")
 
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(order_status_pusher.STEP_PUSH_FAILED, steps)
@@ -332,22 +366,26 @@ class TestWorker(FrappeTestCase):
 			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_post,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-3")
+			_push(payload={"status": "ACCEPTED"}, correlation_id="corr-3")
 		mock_post.assert_not_called()
 		self.assertIn(
 			order_status_pusher.STEP_PUSH_ABORTED_DISABLED,
 			[c.kwargs.get("step") for c in mock_log.call_args_list],
 		)
 
-	def test_aborts_when_so_lost_wave_order_id(self):
+	def test_aborts_when_dispatcher_passes_empty_wave_order_id(self):
+		"""If somehow the dispatcher plumbs through wave_order_id='', the worker logs an abort.
+
+		The dispatcher is supposed to filter empty ids before enqueueing, so
+		this is a defensive worker-side check rather than a normal flow.
+		"""
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=None),
 			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_post,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-4")
+			_push(payload={"status": "ACCEPTED"}, correlation_id="corr-4", wave_order_id="")
 		mock_post.assert_not_called()
 		self.assertIn(
 			order_status_pusher.STEP_PUSH_ABORTED_NO_WAVE_ID,
@@ -360,24 +398,42 @@ class TestWorker(FrappeTestCase):
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
 			# Must not raise.
-			order_status_pusher.push_order_status(DUMMY_SO, "submit", {"status": "ACCEPTED"}, "corr-5")
+			_push(payload={"status": "ACCEPTED"}, correlation_id="corr-5")
 		self.assertIn(
 			order_status_pusher.STEP_PUSH_UNEXPECTED_ERROR,
 			[c.kwargs.get("step") for c in mock_log.call_args_list],
 		)
+
+	def test_back_compat_accepts_legacy_sales_order_name_kwarg(self):
+		"""Older queued jobs serialised before this PR pass `sales_order_name`; new worker absorbs it."""
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={}),
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			# Deliberately call with the LEGACY shape (sales_order_name, no source_docname).
+			order_status_pusher.push_order_status(
+				erp_event="submit",
+				payload={"status": "ACCEPTED"},
+				correlation_id="corr-legacy",
+				wave_order_id=DUMMY_WAVE_ORDER_ID,
+				sales_order_name=DUMMY_SO,
+			)
+		# Should still produce success rows pointing at DUMMY_SO via the
+		# default source_doctype 'Sales Order'.
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_PUSH_SUCCESS, steps)
 
 	def test_logs_unsupported_warning_when_payload_carries_only_delivery_status(self):
 		"""A rule that sets only wave_delivery_status produces a warning + no HTTP call."""
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
 			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_post,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(
-				DUMMY_SO, "submit", {"deliveryStatus": "OUT_FOR_DELIVERY"}, "corr-ds-only"
-			)
+			_push(payload={"deliveryStatus": "OUT_FOR_DELIVERY"}, correlation_id="corr-ds-only")
 		mock_post.assert_not_called()
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(order_status_pusher.STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED, steps)
@@ -388,15 +444,12 @@ class TestWorker(FrappeTestCase):
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe.db, "get_value", return_value=DUMMY_WAVE_ORDER_ID),
 			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={}) as mock_post,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher.push_order_status(
-				DUMMY_SO,
-				"submit",
-				{"status": "UNDER_DELIVERY", "deliveryStatus": "OUT_FOR_DELIVERY"},
-				"corr-both",
+			_push(
+				payload={"status": "UNDER_DELIVERY", "deliveryStatus": "OUT_FOR_DELIVERY"},
+				correlation_id="corr-both",
 			)
 		# Status pushed via the path-keyed endpoint.
 		mock_post.assert_called_once()
@@ -511,6 +564,12 @@ class TestResyncEndpoint(FrappeTestCase):
 		self.assertTrue(result["ok"])
 		self.assertEqual(result["event"], "cancel")
 		self.assertEqual(result["payload"], {"status": "CANCELLED"})
+		kwargs = mock_enqueue.call_args.kwargs
 		# Worker function expects erp_event, not event (frappe.enqueue eats event).
-		self.assertEqual(mock_enqueue.call_args.kwargs["erp_event"], "cancel")
-		self.assertNotIn("event", mock_enqueue.call_args.kwargs)
+		self.assertEqual(kwargs["erp_event"], "cancel")
+		self.assertNotIn("event", kwargs)
+		# Source-doctype + source-docname plumbed through so the worker's log
+		# rows point at the actual SO (not a hardcoded "Sales Order" assumption).
+		self.assertEqual(kwargs["source_doctype"], "Sales Order")
+		self.assertEqual(kwargs["source_docname"], DUMMY_SO)
+		self.assertEqual(kwargs["wave_order_id"], DUMMY_WAVE_ORDER_ID)
