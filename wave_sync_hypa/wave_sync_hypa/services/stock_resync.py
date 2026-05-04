@@ -87,7 +87,7 @@ def _run_resync(batch_id: str, item_codes: list[str] | None) -> None:
 	log_step(
 		correlation_id=batch_id,
 		step=STEP_RESYNC_COMPLETED,
-		level="Info",
+		level="Success",
 		friendly_id=batch_id,
 		request_body={"queued": queued, "enqueue_failed": enqueue_failed, "scope": scope},
 	)

@@ -267,7 +267,7 @@ def _post_status(
 	log_step(
 		correlation_id=correlation_id,
 		step=STEP_PUSH_SUCCESS,
-		level="Info",
+		level="Success",
 		doc_type=source_doctype,
 		action=erp_event,
 		linked_doctype=source_doctype,
