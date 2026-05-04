@@ -44,12 +44,19 @@ def push_pick_list_batch_ids(
 	wave_order_id: str,
 	products_data: list[dict],
 	correlation_id: str,
+	manual_trigger: bool = False,
 ) -> None:
 	"""Job entry point: PATCH the Wave order with batch numbers; never raises.
 
 	`products_data` shape: [{"item_code": "...", "batch_ids": [...]}, ...].
 	The handler pre-grouped these per Wave order; we resolve item_code ->
 	wave_product_id here and then PATCH.
+
+	`manual_trigger=True` bypasses the `pick_list_batch_ids_push_enabled`
+	kill-switch — the operator-clicked "Send Batch IDs to Wave" button is
+	an explicit consent and should fire regardless of the auto-on-create
+	setting. The outbound config triplet (base_url/api_key/app_id) is
+	still required either way.
 	"""
 	log_step(
 		correlation_id=correlation_id,
@@ -59,9 +66,10 @@ def push_pick_list_batch_ids(
 		linked_doctype="Pick List",
 		linked_docname=pick_list_name,
 		wave_id=wave_order_id or None,
+		request_body={"manual_trigger": manual_trigger} if manual_trigger else None,
 	)
 	try:
-		_push_inner(pick_list_name, wave_order_id, products_data, correlation_id)
+		_push_inner(pick_list_name, wave_order_id, products_data, correlation_id, manual_trigger)
 	except Exception as exc:
 		log_step(
 			correlation_id=correlation_id,
@@ -81,11 +89,12 @@ def _push_inner(
 	wave_order_id: str,
 	products_data: list[dict],
 	correlation_id: str,
+	manual_trigger: bool = False,
 ) -> None:
 	"""Validate, resolve, build minimal body, PATCH; log every transition."""
 	settings = frappe.get_cached_doc("Wave Settings")
 
-	if not settings.get("pick_list_batch_ids_push_enabled"):
+	if not manual_trigger and not settings.get("pick_list_batch_ids_push_enabled"):
 		log_step(
 			correlation_id=correlation_id,
 			step=STEP_ABORTED_DISABLED,
@@ -230,7 +239,7 @@ def _attempt_patch(
 	log_step(
 		correlation_id=correlation_id,
 		step=STEP_PUSH_SUCCESS,
-		level="Info",
+		level="Success",
 		doc_type="Pick List",
 		linked_doctype="Pick List",
 		linked_docname=pick_list_name,
