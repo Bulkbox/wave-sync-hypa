@@ -47,6 +47,7 @@ doctype_js = {
 	"Sales Order": "public/js/sales_order.js",
 	"Wave Settings": "public/js/wave_settings.js",
 	"Item": "public/js/item.js",
+	"Pick List": "public/js/pick_list.js",
 }
 doctype_list_js = {
 	"Item": "public/js/item_list.js",

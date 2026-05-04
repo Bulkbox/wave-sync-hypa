@@ -59,6 +59,26 @@ class TestPushPickListBatchIds(FrappeTestCase):
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pick_list_batch_pusher.STEP_ABORTED_DISABLED, steps)
 
+	def test_manual_trigger_bypasses_kill_switch(self):
+		"""manual_trigger=True PATCHes even when pick_list_batch_ids_push_enabled is off."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=0)),
+			patch.object(frappe.db, "get_value", return_value="wave-prod-jtd011"),
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order", return_value={"_id": DUMMY_WAVE_ORDER_ID}) as mock_patch,
+			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
+		):
+			pick_list_batch_pusher.push_pick_list_batch_ids(
+				pick_list_name=DUMMY_PL,
+				wave_order_id=DUMMY_WAVE_ORDER_ID,
+				products_data=[{"item_code": "JTD011", "batch_ids": ["B-001"]}],
+				correlation_id="corr-manual",
+				manual_trigger=True,
+			)
+		mock_patch.assert_called_once()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertNotIn(pick_list_batch_pusher.STEP_ABORTED_DISABLED, steps)
+		self.assertIn(pick_list_batch_pusher.STEP_PUSH_SUCCESS, steps)
+
 	def test_aborts_when_outbound_config_incomplete(self):
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings(full_config=False)),
