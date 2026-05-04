@@ -164,6 +164,10 @@ doc_events = {
 		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.pick_list.stamp_wave_order_id",
 		"after_insert": "wave_sync_hypa.wave_sync_hypa.handlers.pick_list.after_pick_list_insert",
 	},
+	"Payment Entry": {
+		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.payment_entry.stamp_wave_order_id",
+		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.payment_entry.on_payment_entry_submit",
+	},
 }
 
 # Scheduled Tasks
