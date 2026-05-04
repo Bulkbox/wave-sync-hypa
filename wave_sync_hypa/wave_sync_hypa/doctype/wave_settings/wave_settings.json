@@ -21,6 +21,7 @@
   "wave_api_key",
   "outbound_stock_sync_enabled",
   "outbound_order_status_sync_enabled",
+  "pick_list_batch_ids_push_enabled",
   "erp_defaults_section",
   "default_company",
   "default_warehouse",
@@ -131,6 +132,13 @@
    "fieldname": "outbound_order_status_sync_enabled",
    "fieldtype": "Check",
    "label": "Outbound Order Status Sync Enabled"
+  },
+  {
+   "default": "0",
+   "description": "When on, every Pick List creation triggers a push of the picked items + batch numbers to Wave. Independent of the Pick List ACCEPTED status push (which is gated by the Outbound Status Rules table — add/remove the (Pick List, after_insert) row to control that channel). Off by default; flip on once Wave's batch-IDs endpoint payload is wired in services/wave_client.",
+   "fieldname": "pick_list_batch_ids_push_enabled",
+   "fieldtype": "Check",
+   "label": "Pick List Batch IDs Push Enabled"
   },
   {
    "fieldname": "erp_defaults_section",

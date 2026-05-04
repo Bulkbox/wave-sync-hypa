@@ -14,6 +14,20 @@ from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 
 DEFAULT_TIMEOUT_SECONDS = 10
 
+# Wave exposes dedicated routes for some terminal-ish transitions (e.g. accept,
+# reject, cancel) instead of the generic /status/{name} endpoint. Map those
+# status names to their override paths here. Anything not listed falls through
+# to the default `/api/v3/admin/orders/{order_id}/status/{status_name}` shape.
+#
+# Only ACCEPTED is overridden today: per Wave's spec, accepting an order is
+# `POST /api/v3/admin/orders/{id}/accept` (no body, no query). Other dedicated
+# routes can be added the moment Wave confirms they exist; until then we keep
+# the generic path-keyed POST as the default so we don't 404 against routes
+# that haven't been published.
+STATUS_PATH_OVERRIDES = {
+	"ACCEPTED": "/api/v3/admin/orders/{order_id}/accept",
+}
+
 
 def _raise_for_response(response: requests.Response, what: str) -> None:
 	"""Convert a non-2xx Wave response into a structured WaveOutboundError.
@@ -128,6 +142,50 @@ def post_order_status(
 	return _parse_json(response)
 
 
+def patch_order(
+	*,
+	base_url: str,
+	api_key: str,
+	app_id: str,
+	order_id: str,
+	body: dict,
+	skip_webhook_notification: bool = False,
+	timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+	"""PATCH /api/v3/admin/orders/{order_id} with a partial OrderV3 body; return parsed response.
+
+	Per Wave's spec the endpoint accepts the OrderV3 admin shape and updates
+	only the keys present in the request body. Callers are responsible for
+	building a minimal body — this client does not curate fields.
+
+	`skip_webhook_notification` controls Wave's `?skipWebhookNotification=`
+	query param. Default False, so the customer-facing webhook still fires
+	on the resulting state mutation.
+	"""
+	if not base_url:
+		raise WaveOutboundError("Wave API base URL is not configured.")
+	if not api_key:
+		raise WaveOutboundError("Wave API key is not configured.")
+	if not app_id:
+		raise WaveOutboundError("Wave App ID is not configured.")
+	if not order_id:
+		raise WaveOutboundError("order_id is required.")
+	if not isinstance(body, dict) or not body:
+		raise WaveOutboundError("PATCH body must be a non-empty dict.")
+
+	url = _build_admin_order_url(base_url, order_id)
+	headers = _build_headers(api_key, app_id)
+	params = {"skipWebhookNotification": "true" if skip_webhook_notification else "false"}
+
+	try:
+		response = requests.patch(url, json=body, params=params, headers=headers, timeout=timeout)
+	except requests.RequestException as exc:
+		raise WaveOutboundError(f"network error calling Wave admin order PATCH: {exc}") from exc
+
+	_raise_for_response(response, "admin order PATCH")
+	return _parse_json(response)
+
+
 def get_product_by_sku(
 	*,
 	base_url: str,
@@ -183,8 +241,22 @@ def _build_stock_sync_url(base_url: str, product_id: str) -> str:
 
 
 def _build_order_status_url(base_url: str, order_id: str, status_name: str) -> str:
-	"""Compose the path-keyed order-status URL per Wave's spec."""
+	"""Compose the order-status URL, honouring per-status overrides where Wave defines them.
+
+	Wave provides dedicated routes for a handful of transitions (currently
+	just `/accept`); STATUS_PATH_OVERRIDES maps the status name to the path
+	template. Everything else falls back to the generic
+	`/api/v3/admin/orders/{order_id}/status/{status_name}` route.
+	"""
+	override = STATUS_PATH_OVERRIDES.get(status_name)
+	if override:
+		return f"{base_url.rstrip('/')}{override.format(order_id=order_id)}"
 	return f"{base_url.rstrip('/')}/api/v3/admin/orders/{order_id}/status/{status_name}"
+
+
+def _build_admin_order_url(base_url: str, order_id: str) -> str:
+	"""Compose the admin-order URL used by PATCH /api/v3/admin/orders/{id}."""
+	return f"{base_url.rstrip('/')}/api/v3/admin/orders/{order_id}"
 
 
 def _build_product_by_sku_url(base_url: str, sku: str) -> str:

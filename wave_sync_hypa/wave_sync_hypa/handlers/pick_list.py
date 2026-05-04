@@ -1,0 +1,228 @@
+"""Pick List hook: route the configured outbound channels on Pick List creation.
+
+Wired in hooks.py:
+
+  Pick List.validate     -> stamp_wave_order_id    (filterability only)
+  Pick List.after_insert -> after_pick_list_insert (the real work)
+
+Pick List submit / cancel are intentionally NOT wired. Wave's interest in a
+Pick List is "the order has been accepted and these items, with these batch
+ids, are about to be dispatched". That information is fully known at the
+moment of creation: by the time after_insert fires, the locations rows have
+been persisted (children commit in the same transaction as the parent), so
+we can read them and emit the right calls. Submitting a Pick List adds no
+new information for Wave.
+
+Two independent channels fire from this handler:
+
+  - Status push: routed through the standard outbound rules table. The
+    expected operator config is one (Pick List, after_insert, ACCEPTED) row
+    in Wave Settings -> Outbound Status Rules.
+
+  - Batch-IDs push: gated by the pick_list_batch_ids_push_enabled Check on
+    Wave Settings. When on, we group locations[] rows by linked Sales
+    Order's wave_order_id, then by item_code, collect distinct batch_no
+    values per item, and enqueue one batch_pusher worker per Wave order.
+    All Wave HTTP calls happen in the worker so form-save latency is
+    unchanged.
+
+The two channels are orthogonal. Status off / batch-IDs on, both off, both
+on, status on / batch-IDs off — all valid configurations.
+"""
+
+from __future__ import annotations
+
+import frappe
+
+from wave_sync_hypa.wave_sync_hypa.handlers import order_status
+from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
+from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+
+STEP_STAMP_MULTI_SOURCE = "pick_list_wave_order_id_multi_source"
+STEP_NO_WAVE_ORDERS = "pick_list_no_wave_sourced_orders"
+STEP_BATCH_IDS_ENQUEUED = "pick_list_batch_ids_push_enqueued"
+STEP_BATCH_IDS_ENQUEUE_FAILED = "pick_list_batch_ids_push_enqueue_failed"
+STEP_BATCH_IDS_NO_BATCHES_TO_PUSH = "pick_list_batch_ids_push_no_batches_to_push"
+
+BATCH_PUSHER_DOTTED_PATH = (
+	"wave_sync_hypa.wave_sync_hypa.services.pick_list_batch_pusher.push_pick_list_batch_ids"
+)
+
+
+def stamp_wave_order_id(doc, method=None) -> None:
+	"""Validate hook: copy the first reachable wave_order_id onto the Pick List.
+
+	Idempotent — bails out when the field is already populated. Pure stamping
+	for desk filterability; emits no outbound traffic and is safe to leave on
+	regardless of any kill-switch.
+	"""
+	if doc.get("wave_order_id"):
+		return
+	wave_ids = _collect_distinct_wave_order_ids(doc)
+	if not wave_ids:
+		return
+	doc.wave_order_id = wave_ids[0]
+	if len(wave_ids) > 1:
+		log_step(
+			correlation_id=new_correlation_id(),
+			step=STEP_STAMP_MULTI_SOURCE,
+			level="Warning",
+			doc_type=doc.doctype,
+			linked_doctype=doc.doctype,
+			linked_docname=doc.name or "<new>",
+			wave_id=wave_ids[0],
+			request_body={"wave_order_ids": wave_ids},
+			error_message=(
+				f"Pick List spans {len(wave_ids)} distinct Wave-sourced Sales Orders. "
+				"Stamping the first on wave_order_id; outbound pushes still fan out to all."
+			),
+		)
+
+
+def after_pick_list_insert(doc, method=None) -> None:
+	"""after_insert hook: route status via the rules table; batch-IDs gated by its own kill-switch."""
+	wave_ids = _collect_distinct_wave_order_ids(doc)
+	if not wave_ids and doc.get("wave_order_id"):
+		wave_ids = [doc.wave_order_id]
+	if not wave_ids:
+		log_step(
+			correlation_id=new_correlation_id(),
+			step=STEP_NO_WAVE_ORDERS,
+			level="Info",
+			doc_type=doc.doctype,
+			linked_doctype=doc.doctype,
+			linked_docname=doc.name,
+			error_message="Pick List has no Wave-sourced Sales Orders to push to.",
+		)
+		return
+
+	order_status.dispatch_with_wave_order_ids(doc, "after_insert", wave_ids)
+
+	settings = frappe.get_cached_doc("Wave Settings")
+	if settings.get("pick_list_batch_ids_push_enabled"):
+		_enqueue_batch_ids_pushes(doc, wave_ids)
+
+
+def _enqueue_batch_ids_pushes(doc, wave_ids: list[str]) -> None:
+	"""For each Wave order, build per-item batch lists and enqueue one worker job."""
+	correlation_id = new_correlation_id()
+	grouped = _group_batches_by_wave_order(doc, wave_ids)
+	for wave_order_id in wave_ids:
+		products_data = grouped.get(wave_order_id) or []
+		if not products_data:
+			log_step(
+				correlation_id=correlation_id,
+				step=STEP_BATCH_IDS_NO_BATCHES_TO_PUSH,
+				level="Info",
+				doc_type=doc.doctype,
+				linked_doctype=doc.doctype,
+				linked_docname=doc.name,
+				wave_id=wave_order_id,
+				error_message="No items with batch numbers found for this Wave order.",
+			)
+			continue
+		try:
+			frappe.enqueue(
+				BATCH_PUSHER_DOTTED_PATH,
+				queue="default",
+				enqueue_after_commit=True,
+				job_name=f"pick_list_batch_ids:{doc.name}:{wave_order_id}",
+				pick_list_name=doc.name,
+				wave_order_id=wave_order_id,
+				products_data=products_data,
+				correlation_id=correlation_id,
+			)
+		except Exception as exc:
+			log_step(
+				correlation_id=correlation_id,
+				step=STEP_BATCH_IDS_ENQUEUE_FAILED,
+				level="Error",
+				doc_type=doc.doctype,
+				linked_doctype=doc.doctype,
+				linked_docname=doc.name,
+				wave_id=wave_order_id,
+				error_message=f"failed to enqueue Pick List batch-IDs push: {exc}",
+				stack_trace=frappe.get_traceback(),
+			)
+			continue
+		log_step(
+			correlation_id=correlation_id,
+			step=STEP_BATCH_IDS_ENQUEUED,
+			level="Info",
+			doc_type=doc.doctype,
+			linked_doctype=doc.doctype,
+			linked_docname=doc.name,
+			wave_id=wave_order_id,
+			request_body={"products_data": products_data},
+		)
+
+
+def _group_batches_by_wave_order(doc, wave_ids: list[str]) -> dict[str, list[dict]]:
+	"""Walk locations[] once, return {wave_order_id: [{item_code, batch_ids}, ...]} preserving row order.
+
+	Within each Wave order group, items are grouped by item_code; multiple
+	rows for the same item across different batches collapse to one entry
+	with a deduped batch_ids array. Rows without a non-empty batch_no are
+	excluded — non-batch-tracked items contribute nothing to the PATCH.
+	"""
+	so_to_wave = _build_so_to_wave_map(doc)
+	allowed = set(wave_ids)
+	grouped: dict[str, dict[str, list[str]]] = {}
+	for row in doc.get("locations") or []:
+		so_name = _row_field(row, "sales_order")
+		if not so_name:
+			continue
+		wave_order_id = (so_to_wave.get(so_name) or "").strip()
+		if not wave_order_id or wave_order_id not in allowed:
+			continue
+		item_code = _row_field(row, "item_code")
+		batch_no = _row_field(row, "batch_no")
+		if not item_code or not batch_no:
+			continue
+		bucket = grouped.setdefault(wave_order_id, {}).setdefault(item_code, [])
+		if batch_no not in bucket:
+			bucket.append(batch_no)
+	return {
+		wave_order_id: [
+			{"item_code": item_code, "batch_ids": batches}
+			for item_code, batches in items.items()
+		]
+		for wave_order_id, items in grouped.items()
+	}
+
+
+def _build_so_to_wave_map(doc) -> dict[str, str]:
+	"""One DB roundtrip per distinct Sales Order on the Pick List; map name -> wave_order_id."""
+	so_names = {
+		_row_field(row, "sales_order")
+		for row in doc.get("locations") or []
+	}
+	so_names.discard("")
+	if not so_names:
+		return {}
+	return {
+		so_name: (frappe.db.get_value("Sales Order", so_name, "wave_order_id") or "")
+		for so_name in so_names
+	}
+
+
+def _collect_distinct_wave_order_ids(doc) -> list[str]:
+	"""Return unique Wave order ids reachable from this Pick List's rows, in row order."""
+	seen: set[str] = set()
+	out: list[str] = []
+	for row in doc.get("locations") or []:
+		so_name = _row_field(row, "sales_order")
+		if not so_name:
+			continue
+		wave_order_id = (frappe.db.get_value("Sales Order", so_name, "wave_order_id") or "").strip()
+		if wave_order_id and wave_order_id not in seen:
+			seen.add(wave_order_id)
+			out.append(wave_order_id)
+	return out
+
+
+def _row_field(row, fieldname: str) -> str:
+	"""Read a field off a child row whether it's a Frappe doc, a _dict, or a plain dict."""
+	if hasattr(row, "get"):
+		return (row.get(fieldname) or "").strip()
+	return (getattr(row, fieldname, "") or "").strip()
