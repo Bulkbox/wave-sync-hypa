@@ -130,7 +130,7 @@ def resolve_wave_product_id(
 	log_step(
 		correlation_id=correlation_id,
 		step=STEP_RESOLVE_SUCCESS,
-		level="Info",
+		level="Success",
 		doc_type="Item",
 		linked_doctype="Item",
 		linked_docname=item_code,
