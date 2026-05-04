@@ -463,7 +463,8 @@ class TestWorker(FrappeTestCase):
 class TestWaveClientPostOrderStatus(FrappeTestCase):
 	"""HTTP-shape tests for post_order_status (path-keyed POST, no body)."""
 
-	def test_url_path_carries_status_name(self):
+	def test_default_url_carries_status_name_in_path(self):
+		"""Statuses without a dedicated route fall through to /api/v3/admin/orders/{id}/status/{name}."""
 		fake_response = MagicMock(status_code=200, content=b'{"ok":true}')
 		fake_response.json.return_value = {"ok": True}
 		with patch.object(requests, "post", return_value=fake_response) as mock_post:
@@ -472,19 +473,43 @@ class TestWaveClientPostOrderStatus(FrappeTestCase):
 				api_key=DUMMY_API_KEY,
 				app_id=DUMMY_APP_ID,
 				order_id=DUMMY_WAVE_ORDER_ID,
-				status_name="ACCEPTED",
+				status_name="INVOICING",
 			)
 		self.assertEqual(result, {"ok": True})
 		args, kwargs = mock_post.call_args
 		self.assertEqual(
 			args[0],
-			f"{DUMMY_BASE_URL}/api/v3/admin/orders/{DUMMY_WAVE_ORDER_ID}/status/ACCEPTED",
+			f"{DUMMY_BASE_URL}/api/v3/admin/orders/{DUMMY_WAVE_ORDER_ID}/status/INVOICING",
 		)
 		self.assertEqual(kwargs["headers"]["X-API-Key"], DUMMY_API_KEY)
 		self.assertEqual(kwargs["headers"]["appId"], DUMMY_APP_ID)
 		# No body, no content-type header on this endpoint.
 		self.assertNotIn("json", kwargs)
 		self.assertNotIn("content-type", kwargs["headers"])
+
+	def test_accepted_routes_to_dedicated_accept_endpoint(self):
+		"""ACCEPTED uses Wave's dedicated route POST /api/v3/admin/orders/{id}/accept, not /status/ACCEPTED.
+
+		Wave exposes a dedicated route for accepting orders. The override map
+		in wave_client redirects status_name='ACCEPTED' to that path while every
+		other status keeps the generic /status/{name} shape. Regression-pin:
+		flipping back to /status/ACCEPTED would silently 404 against Wave.
+		"""
+		fake_response = MagicMock(status_code=200, content=b"{}")
+		fake_response.json.return_value = {}
+		with patch.object(requests, "post", return_value=fake_response) as mock_post:
+			wave_client.post_order_status(
+				base_url=DUMMY_BASE_URL,
+				api_key=DUMMY_API_KEY,
+				app_id=DUMMY_APP_ID,
+				order_id=DUMMY_WAVE_ORDER_ID,
+				status_name="ACCEPTED",
+			)
+		args, _ = mock_post.call_args
+		self.assertEqual(
+			args[0],
+			f"{DUMMY_BASE_URL}/api/v3/admin/orders/{DUMMY_WAVE_ORDER_ID}/accept",
+		)
 
 	def test_non_2xx_raises_outbound_error(self):
 		fake_response = MagicMock(status_code=400)

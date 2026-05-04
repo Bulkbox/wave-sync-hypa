@@ -37,12 +37,12 @@
   },
   {
    "columns": 1,
-   "description": "ERPNext lifecycle hook firing the rule. submit / cancel cover the canonical state changes; update_after_submit covers in-place transitions like delivery_status flipping to Delivered.",
+   "description": "ERPNext lifecycle hook firing the rule. submit / cancel cover the canonical state changes; update_after_submit covers in-place transitions like delivery_status flipping to Delivered; after_insert fires on first save (used for Pick List, where creation is the operator-meaningful action).",
    "fieldname": "erp_event",
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "ERP Event",
-   "options": "submit\ncancel\nupdate_after_submit",
+   "options": "submit\ncancel\nupdate_after_submit\nafter_insert",
    "reqd": 1
   },
   {
