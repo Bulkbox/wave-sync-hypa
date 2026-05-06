@@ -51,7 +51,7 @@ class TestPushPickListBatchIds(FrappeTestCase):
 		"""Settings.pick_list_batch_ids_push_enabled flipped off mid-queue -> Warning + no PATCH."""
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=0)),
-			patch.object(pick_list_batch_pusher.wave_client, "patch_order") as mock_patch,
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products") as mock_patch,
 			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
 		):
 			_call([{"item_code": "JTD011", "batch_ids": ["B-001"]}])
@@ -64,7 +64,7 @@ class TestPushPickListBatchIds(FrappeTestCase):
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=0)),
 			patch.object(frappe.db, "get_value", return_value="wave-prod-jtd011"),
-			patch.object(pick_list_batch_pusher.wave_client, "patch_order", return_value={"_id": DUMMY_WAVE_ORDER_ID}) as mock_patch,
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products", return_value={"_id": DUMMY_WAVE_ORDER_ID}) as mock_patch,
 			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
 		):
 			pick_list_batch_pusher.push_pick_list_batch_ids(
@@ -82,7 +82,7 @@ class TestPushPickListBatchIds(FrappeTestCase):
 	def test_aborts_when_outbound_config_incomplete(self):
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings(full_config=False)),
-			patch.object(pick_list_batch_pusher.wave_client, "patch_order") as mock_patch,
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products") as mock_patch,
 			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
 		):
 			_call([{"item_code": "JTD011", "batch_ids": ["B-001"]}])
@@ -93,7 +93,7 @@ class TestPushPickListBatchIds(FrappeTestCase):
 	def test_aborts_when_wave_order_id_empty(self):
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
-			patch.object(pick_list_batch_pusher.wave_client, "patch_order") as mock_patch,
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products") as mock_patch,
 			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
 		):
 			pick_list_batch_pusher.push_pick_list_batch_ids(
@@ -119,7 +119,7 @@ class TestPushPickListBatchIds(FrappeTestCase):
 				"resolve_wave_product_id",
 				side_effect=_resolver_side_effect,
 			),
-			patch.object(pick_list_batch_pusher.wave_client, "patch_order", return_value={"_id": DUMMY_WAVE_ORDER_ID}) as mock_patch,
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products", return_value={"_id": DUMMY_WAVE_ORDER_ID}) as mock_patch,
 			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
 		):
 			_call([
@@ -127,10 +127,10 @@ class TestPushPickListBatchIds(FrappeTestCase):
 				{"item_code": "MISSING", "batch_ids": ["B-X"]},
 			])
 
-		# PATCH was issued with only the resolved item.
+		# PATCH was issued with only the resolved item; raw-array body shape.
 		mock_patch.assert_called_once()
 		body = mock_patch.call_args.kwargs["body"]
-		self.assertEqual(body, {"products": [{"productId": "wave-prod-jtd011", "batchIds": ["B-001"]}]})
+		self.assertEqual(body, [{"productId": "wave-prod-jtd011", "batchIds": ["B-001"]}])
 		# Skip row was logged.
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pick_list_batch_pusher.STEP_SKIPPED_UNRESOLVED_ITEM, steps)
@@ -145,7 +145,7 @@ class TestPushPickListBatchIds(FrappeTestCase):
 				"resolve_wave_product_id",
 				return_value=None,
 			),
-			patch.object(pick_list_batch_pusher.wave_client, "patch_order") as mock_patch,
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products") as mock_patch,
 			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
 		):
 			_call([{"item_code": "MISSING", "batch_ids": ["B-X"]}])
@@ -153,12 +153,12 @@ class TestPushPickListBatchIds(FrappeTestCase):
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pick_list_batch_pusher.STEP_ABORTED_EMPTY_PAYLOAD, steps)
 
-	def test_calls_patch_order_with_minimal_products_only_body(self):
-		"""Body contains only `products` and per-product only `productId` + `batchIds`."""
+	def test_calls_patch_order_products_with_raw_array_body(self):
+		"""Body is a raw array (no wrapper) and each entry only has productId + batchIds."""
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
 			patch.object(frappe.db, "get_value", return_value="wave-prod-jtd011"),  # cached id hit
-			patch.object(pick_list_batch_pusher.wave_client, "patch_order", return_value={"_id": DUMMY_WAVE_ORDER_ID, "status": "ACCEPTED"}) as mock_patch,
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products", return_value={"_id": DUMMY_WAVE_ORDER_ID, "status": "ACCEPTED"}) as mock_patch,
 			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
 		):
 			_call([{"item_code": "JTD011", "batch_ids": ["B-001", "B-002"]}])
@@ -168,7 +168,7 @@ class TestPushPickListBatchIds(FrappeTestCase):
 			api_key=DUMMY_API_KEY,
 			app_id=DUMMY_APP_ID,
 			order_id=DUMMY_WAVE_ORDER_ID,
-			body={"products": [{"productId": "wave-prod-jtd011", "batchIds": ["B-001", "B-002"]}]},
+			body=[{"productId": "wave-prod-jtd011", "batchIds": ["B-001", "B-002"]}],
 		)
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pick_list_batch_pusher.STEP_PUSH_ATTEMPT, steps)
@@ -179,12 +179,12 @@ class TestPushPickListBatchIds(FrappeTestCase):
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
 			patch.object(frappe.db, "get_value", return_value="wave-prod-jtd011"),
-			patch.object(pick_list_batch_pusher.wave_client, "patch_order", return_value={}) as mock_patch,
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products", return_value={}) as mock_patch,
 			patch.object(pick_list_batch_pusher, "log_step"),
 		):
 			_call([{"item_code": "JTD011", "batch_ids": ["B-001", "B-002", "B-001", "B-003"]}])
 		body = mock_patch.call_args.kwargs["body"]
-		self.assertEqual(body["products"][0]["batchIds"], ["B-001", "B-002", "B-003"])
+		self.assertEqual(body[0]["batchIds"], ["B-001", "B-002", "B-003"])
 
 	def test_logs_failed_on_outbound_error_and_swallows(self):
 		"""WaveOutboundError -> Failed Error row, no exception raised out of worker."""
@@ -193,7 +193,7 @@ class TestPushPickListBatchIds(FrappeTestCase):
 			patch.object(frappe.db, "get_value", return_value="wave-prod-jtd011"),
 			patch.object(
 				pick_list_batch_pusher.wave_client,
-				"patch_order",
+				"patch_order_products",
 				side_effect=WaveOutboundError("HTTP 500: server error"),
 			),
 			patch.object(pick_list_batch_pusher, "log_step") as mock_log,
