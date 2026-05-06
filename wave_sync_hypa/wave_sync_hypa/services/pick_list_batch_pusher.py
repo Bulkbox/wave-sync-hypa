@@ -152,8 +152,9 @@ def _push_inner(
 		)
 		return
 
-	body = {"products": products_payload}
-	_attempt_patch(pick_list_name, wave_order_id, config, body, correlation_id)
+	# Wave's PATCH /admin/orders/{id}/products takes a RAW ARRAY body, not a
+	# {"products": [...]} wrapper. Pass products_payload through unchanged.
+	_attempt_patch(pick_list_name, wave_order_id, config, products_payload, correlation_id)
 
 
 def _build_products_payload(
@@ -196,11 +197,11 @@ def _attempt_patch(
 	pick_list_name: str,
 	wave_order_id: str,
 	config: dict,
-	body: dict,
+	body: list,
 	correlation_id: str,
 ) -> None:
 	"""Issue the PATCH; log attempt + outcome."""
-	url_path = f"/api/v3/admin/orders/{wave_order_id}"
+	url_path = f"/api/v3/admin/orders/{wave_order_id}/products"
 	log_step(
 		correlation_id=correlation_id,
 		step=STEP_PUSH_ATTEMPT,
@@ -212,7 +213,7 @@ def _attempt_patch(
 		request_body={"method": "PATCH", "path": url_path, "body": body},
 	)
 	try:
-		response = wave_client.patch_order(
+		response = wave_client.patch_order_products(
 			base_url=config["base_url"],
 			api_key=config["api_key"],
 			app_id=config["app_id"],
