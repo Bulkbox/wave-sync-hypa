@@ -43,10 +43,25 @@ STEP_NO_WAVE_ORDERS = "pick_list_no_wave_sourced_orders"
 STEP_BATCH_IDS_ENQUEUED = "pick_list_batch_ids_push_enqueued"
 STEP_BATCH_IDS_ENQUEUE_FAILED = "pick_list_batch_ids_push_enqueue_failed"
 STEP_BATCH_IDS_NO_BATCHES_TO_PUSH = "pick_list_batch_ids_push_no_batches_to_push"
+STEP_SUBMIT_BLOCKED = "pick_list_submit_blocked"
+STEP_CANCEL_BLOCKED = "pick_list_cancel_blocked"
 
 BATCH_PUSHER_DOTTED_PATH = (
 	"wave_sync_hypa.wave_sync_hypa.services.pick_list_batch_pusher.push_pick_list_batch_ids"
 )
+
+# Role that lets a human submit/cancel a Pick List from ERP when the
+# pick_list_erp_submit_lockdown_enabled kill-switch is on. System Manager
+# always passes the gate too, but that role is too privileged to be the
+# everyday answer for warehouse leads — this dedicated role is the one ops
+# actually grants.
+PICK_LIST_OVERRIDE_ROLE = "Pick List Wave Override"
+
+# Forward-compat seam: the future inbound webhook handler will set this flag
+# right before calling doc.submit() so the gate lets it through. Nothing in
+# this module sets the flag yet — it's intentionally read-only here so the
+# webhook PR is a one-line change.
+INBOUND_SUBMIT_FLAG = "wave_inbound_pick_list_submit"
 
 
 def stamp_wave_order_id(doc, method=None) -> None:
@@ -226,3 +241,56 @@ def _row_field(row, fieldname: str) -> str:
 	if hasattr(row, "get"):
 		return (row.get(fieldname) or "").strip()
 	return (getattr(row, fieldname, "") or "").strip()
+
+
+def block_unprivileged_pick_list_submit(doc, method=None) -> None:
+	"""before_submit guard: refuse ERP-side submits unless the user is privileged.
+
+	Pick Lists are Wave's territory once the lockdown is on: picking happens
+	in the Wave app, and a (future) inbound webhook will call doc.submit()
+	with the INBOUND_SUBMIT_FLAG set. Direct submits from the Desk become a
+	manager-only escape hatch. When the lockdown setting is off, this is a
+	no-op so existing sites keep working until ops flips the switch.
+	"""
+	_enforce_pick_list_action_gate(doc, action="submit", step=STEP_SUBMIT_BLOCKED)
+
+
+def block_unprivileged_pick_list_cancel(doc, method=None) -> None:
+	"""before_cancel guard: mirror of submit gate, same reasoning."""
+	_enforce_pick_list_action_gate(doc, action="cancel", step=STEP_CANCEL_BLOCKED)
+
+
+def _enforce_pick_list_action_gate(doc, *, action: str, step: str) -> None:
+	"""Common gate: pass when lockdown off / inbound flag set / user privileged."""
+	settings = frappe.get_cached_doc("Wave Settings")
+	if not settings.get("pick_list_erp_submit_lockdown_enabled"):
+		return
+	if frappe.flags.get(INBOUND_SUBMIT_FLAG):
+		return
+	user = frappe.session.user
+	roles = set(frappe.get_roles(user))
+	if PICK_LIST_OVERRIDE_ROLE in roles or "System Manager" in roles:
+		return
+
+	log_step(
+		correlation_id=new_correlation_id(),
+		step=step,
+		level="Warning",
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name,
+		wave_id=doc.get("wave_order_id") or None,
+		error_message=(
+			f"User '{user}' attempted to {action} this Pick List from ERP while the Wave "
+			f"submit lockdown is on. Action blocked. Assign the '{PICK_LIST_OVERRIDE_ROLE}' "
+			"role to allow manual overrides."
+		),
+	)
+	frappe.throw(
+		msg=(
+			"Pick Lists are submitted by Wave once picking is complete. "
+			f"Ask a Wave Operations Manager if you need to {action} this Pick List manually."
+		),
+		title="Pick List action restricted",
+		exc=frappe.PermissionError,
+	)

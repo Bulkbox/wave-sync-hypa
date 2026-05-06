@@ -164,6 +164,8 @@ doc_events = {
 	"Pick List": {
 		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.pick_list.stamp_wave_order_id",
 		"after_insert": "wave_sync_hypa.wave_sync_hypa.handlers.pick_list.after_pick_list_insert",
+		"before_submit": "wave_sync_hypa.wave_sync_hypa.handlers.pick_list.block_unprivileged_pick_list_submit",
+		"before_cancel": "wave_sync_hypa.wave_sync_hypa.handlers.pick_list.block_unprivileged_pick_list_cancel",
 	},
 	"Payment Entry": {
 		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.payment_entry.stamp_wave_order_id",

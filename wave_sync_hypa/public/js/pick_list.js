@@ -1,9 +1,17 @@
-// Wave Sync — Pick List form: manual batch-IDs push button.
+// Wave Sync — Pick List form: manual batch-IDs push button + submit lockdown UX.
 //
-// On every refresh, add a "Send Batch IDs to Wave" button under a
-// "Wave Sync" group. Clicking it asks for confirmation and invokes the
-// whitelisted endpoint, which enqueues the PATCH worker for each linked
-// Wave order (bypassing the auto-fire kill-switch on Wave Settings).
+// On every refresh:
+//   1. Add a "Send Batch IDs to Wave" button under a "Wave Sync" group.
+//      Clicking it asks for confirmation and invokes the whitelisted endpoint,
+//      which enqueues the PATCH worker for each linked Wave order (bypassing
+//      the auto-fire kill-switch on Wave Settings).
+//   2. When the ERP submit lockdown is on AND the user lacks the override
+//      role, hide the primary Submit button and surface a dashboard hint.
+//      Server-side guards in handlers/pick_list.py are the actual enforcement;
+//      this is purely a UX nicety so unprivileged users don't see a button
+//      they can't use.
+
+const PICK_LIST_OVERRIDE_ROLE = "Pick List Wave Override";
 
 frappe.ui.form.on("Pick List", {
 	refresh(frm) {
@@ -13,8 +21,34 @@ frappe.ui.form.on("Pick List", {
 			() => _confirm_and_push(frm),
 			__("Wave Sync")
 		);
+		_maybe_hide_submit_when_locked_down(frm);
 	},
 });
+
+function _maybe_hide_submit_when_locked_down(frm) {
+	frappe.db
+		.get_single_value("Wave Settings", "pick_list_erp_submit_lockdown_enabled")
+		.then((lockdown) => {
+			if (!parseInt(lockdown || 0)) return;
+			const allowed =
+				frappe.user.has_role(PICK_LIST_OVERRIDE_ROLE) ||
+				frappe.user.has_role("System Manager");
+			if (allowed) return;
+			// Wait for Frappe to settle the primary button after refresh, then
+			// hide it if it's the Submit action. Cancel lives in the menu and
+			// is gated server-side; we accept its visibility for now.
+			setTimeout(() => {
+				const txt = frm.page.btn_primary?.text?.();
+				if (txt === __("Submit")) {
+					frm.page.btn_primary.hide();
+					frm.dashboard.add_indicator(
+						__("Submit handled by Wave"),
+						"blue"
+					);
+				}
+			}, 200);
+		});
+}
 
 function _confirm_and_push(frm) {
 	frappe.confirm(
