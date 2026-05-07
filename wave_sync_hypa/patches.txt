@@ -7,3 +7,4 @@
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.relax_wave_order_id_uniqueness
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_default_outbound_rules
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_pick_list_wave_override_role
+wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_default_payment_method_mappings

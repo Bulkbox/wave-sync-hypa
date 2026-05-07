@@ -37,7 +37,8 @@
   "inbound_status_rules",
   "outbound_status_rules",
   "fee_mappings",
-  "tax_rules"
+  "tax_rules",
+  "payment_method_mappings"
  ],
  "fields": [
   {
@@ -246,6 +247,13 @@
    "fieldtype": "Table",
    "label": "Tax Rules",
    "options": "Wave Tax Rule"
+  },
+  {
+   "description": "Maps Wave's paymentType strings to a classification (prepaid|cod) and an ERP Mode of Payment. Read at order intake to stamp wave_payment_classification on the Sales Order, and at Payment Entry submit to validate that the right MOP is being used for the order's payment class.",
+   "fieldname": "payment_method_mappings",
+   "fieldtype": "Table",
+   "label": "Payment Method Mappings",
+   "options": "Wave Payment Method Mapping"
   }
  ],
  "index_web_pages_for_search": 1,
