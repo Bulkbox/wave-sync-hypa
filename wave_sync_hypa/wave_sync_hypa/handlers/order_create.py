@@ -20,6 +20,18 @@ from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveResolutionError, WaveValidationError
 from wave_sync_hypa.wave_sync_hypa.utils.money import cents_to_major
 
+STEP_PAYMENT_METADATA_STAMPED = "payment_metadata_stamped"
+STEP_PAYMENT_MAPPING_MISSING = "payment_method_mapping_missing"
+STEP_PAYMENT_METADATA_ABSENT = "payment_metadata_absent"
+
+# paymentStatus -> wave_payment_state for prepaid orders. Anything not in this
+# map (or COMPLETED, handled separately) flags the SO for manual review.
+_PREPAID_STATUS_TO_STATE = {
+	"PENDING": "Pending",
+	"FAILED": "Failed",
+	"CANCELLED": "Refunded",
+}
+
 
 def handle(payload: dict, correlation_id: str) -> None:
 	"""Orchestrate ORDER.CREATE: dedup by wave_order_id, resolve parts, draft the Sales Order."""
@@ -38,6 +50,7 @@ def handle(payload: dict, correlation_id: str) -> None:
 	skipped_tax = _apply_tax_template(sales_order, settings)
 	_append_product_lines(sales_order, payload, correlation_id)
 	skipped_fees = _append_fee_lines(sales_order, payload, settings)
+	_apply_payment_metadata(sales_order, settings, payload, correlation_id)
 	_persist_sales_order(sales_order)
 
 	if skipped_fees:
@@ -220,6 +233,120 @@ def _append_fee_lines(sales_order, payload: dict, settings) -> list[dict]:
 			},
 		)
 	return skipped
+
+
+def _apply_payment_metadata(sales_order, settings, payload: dict, correlation_id: str) -> None:
+	"""Stamp Wave's payment metadata (paymentType, status, gateway, reference, hold) on the SO.
+
+	Reads the Wave Payment Method Mapping table to translate paymentType into a
+	classification (prepaid|cod) and to derive an operator-readable wave_payment_state.
+	Amounts arrive in minor units (cents) and are converted to major units via
+	cents_to_major(amount, settings.price_scale_divisor) so the validator at PE
+	submit time can compare directly against pe.paid_amount in major units.
+
+	Three cases:
+	  - mapping found: stamp every field, set wave_payment_state from
+	    classification + paymentStatus.
+	  - mapping missing for this paymentType: stamp the raw fields anyway (so
+	    operators can investigate), flag wave_manual_review_required, log Warning.
+	  - paymentType absent from payload entirely: log Info, return.
+	"""
+	payment_type = (payload.get("paymentType") or "").strip()
+	if not payment_type:
+		log_step(
+			correlation_id,
+			STEP_PAYMENT_METADATA_ABSENT,
+			"Info",
+			doc_type="ORDER",
+			action="CREATE",
+			wave_id=payload.get("_id"),
+			friendly_id=payload.get("friendlyId"),
+			error_message="ORDER.CREATE payload has no paymentType; nothing to stamp.",
+		)
+		return
+
+	divisor = int(settings.price_scale_divisor or 100)
+	hold_major = cents_to_major(payload.get("paymentHold"), divisor)
+	additional_hold_major = cents_to_major(
+		(payload.get("additionalPaymentHold") or {}).get("amount"), divisor,
+	)
+	payment_status = (payload.get("paymentStatus") or "").strip()
+
+	# Always stamp the raw observable fields so operators have something to go on
+	# even when the mapping table is incomplete. Classification + state come from
+	# the mapping; without it those two stay blank.
+	sales_order.wave_payment_type = payment_type
+	sales_order.wave_payment_status = payment_status or None
+	sales_order.wave_payment_gateway = (payload.get("paymentGateway") or "").strip() or None
+	sales_order.wave_payment_reference = (payload.get("paymentReference") or "").strip() or None
+	sales_order.wave_payment_hold = hold_major
+	sales_order.wave_additional_payment_hold = additional_hold_major
+
+	mapping = _resolve_payment_method_mapping(settings, payment_type)
+	if mapping is None:
+		sales_order.wave_manual_review_required = 1
+		log_step(
+			correlation_id,
+			STEP_PAYMENT_MAPPING_MISSING,
+			"Warning",
+			doc_type="ORDER",
+			action="CREATE",
+			wave_id=payload.get("_id"),
+			friendly_id=payload.get("friendlyId"),
+			error_message=(
+				f"No Wave Payment Method Mapping for paymentType='{payment_type}'. "
+				"Order metadata stamped but classification is unset; add a row in "
+				"Wave Settings > Rules > Payment Method Mappings."
+			),
+		)
+		return
+
+	classification = (mapping.get("classification") or "").strip()
+	sales_order.wave_payment_classification = classification or None
+	sales_order.wave_payment_state = _derive_payment_state(classification, payment_status)
+	if classification == "prepaid" and payment_status and payment_status != "COMPLETED":
+		# Prepaid orders that aren't COMPLETED at intake (PENDING/FAILED/CANCELLED)
+		# need an accountant to look at them.
+		sales_order.wave_manual_review_required = 1
+
+	log_step(
+		correlation_id,
+		STEP_PAYMENT_METADATA_STAMPED,
+		"Info",
+		doc_type="ORDER",
+		action="CREATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		response_body={
+			"payment_type": payment_type,
+			"classification": classification,
+			"payment_state": sales_order.wave_payment_state,
+			"payment_hold_major": hold_major,
+			"additional_hold_major": additional_hold_major,
+		},
+	)
+
+
+def _resolve_payment_method_mapping(settings, payment_type: str) -> dict | None:
+	"""Return the first mapping row whose wave_payment_type matches, else None."""
+	for row in settings.get("payment_method_mappings") or []:
+		if (row.get("wave_payment_type") or "").strip() == payment_type:
+			return {
+				"classification": row.get("classification"),
+				"mode_of_payment": row.get("mode_of_payment"),
+			}
+	return None
+
+
+def _derive_payment_state(classification: str, payment_status: str) -> str | None:
+	"""Map (classification, paymentStatus) to the SO's wave_payment_state Select value."""
+	if classification == "prepaid":
+		if payment_status == "COMPLETED":
+			return "Paid (Online)"
+		return _PREPAID_STATUS_TO_STATE.get(payment_status, "Pending")
+	if classification == "cod":
+		return "Awaiting Cash on Delivery"
+	return None
 
 
 def _persist_sales_order(sales_order) -> None:

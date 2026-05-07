@@ -30,14 +30,15 @@ from __future__ import annotations
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.handlers import order_status
-from wave_sync_hypa.wave_sync_hypa.services import payment_status_resolver
+from wave_sync_hypa.wave_sync_hypa.services import payment_status_resolver, payment_validator
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.pe_references import (
+	collect_distinct_wave_order_ids as _collect_distinct_wave_order_ids,
+)
 
 STEP_STAMP_MULTI_SOURCE = "payment_entry_wave_order_id_multi_source"
 STEP_SKIPPED_PAYMENT_TYPE = "payment_entry_skipped_non_receive_payment_type"
-
-REFERENCE_DOCTYPES_WITH_WAVE_ID = ("Sales Invoice", "Sales Order")
 
 
 def stamp_wave_order_id(doc, method=None) -> None:
@@ -100,29 +101,16 @@ def on_payment_entry_submit(doc, method=None) -> None:
 		)
 
 
-def _collect_distinct_wave_order_ids(doc) -> list[str]:
-	"""Return unique Wave order ids reachable from this PE's references[], in row order.
+def validate_payment_before_submit(doc, method=None) -> None:
+	"""before_submit hook: delegate to payment_validator; raises ValidationError on hard-block branches.
 
-	Walks `payment_entry_reference` rows for Sales Invoice or Sales Order
-	targets and dereferences `<doctype>.wave_order_id`. Other reference
-	doctypes (Journal Entry, Expense Claim, etc.) are silently skipped.
+	Pure thin wrapper kept here so hooks.py points at a handler module like
+	the rest of the integration. The actual logic lives in
+	services/payment_validator.py.
 	"""
-	seen: set[str] = set()
-	out: list[str] = []
-	for ref in doc.get("references") or []:
-		ref_doctype = _ref_field(ref, "reference_doctype")
-		ref_name = _ref_field(ref, "reference_name")
-		if ref_doctype not in REFERENCE_DOCTYPES_WITH_WAVE_ID or not ref_name:
-			continue
-		wave_order_id = (frappe.db.get_value(ref_doctype, ref_name, "wave_order_id") or "").strip()
-		if wave_order_id and wave_order_id not in seen:
-			seen.add(wave_order_id)
-			out.append(wave_order_id)
-	return out
+	payment_validator.validate_pe_before_submit(doc)
 
 
-def _ref_field(ref, fieldname: str) -> str:
-	"""Read a field off a PE reference row whether it's a Frappe doc, a _dict, or a plain dict."""
-	if hasattr(ref, "get"):
-		return (ref.get(fieldname) or "").strip()
-	return (getattr(ref, fieldname, "") or "").strip()
+# _collect_distinct_wave_order_ids is imported from services.pe_references above.
+# The validator (services.payment_validator) imports the same helper, so both
+# code paths share one definition of "which references count as Wave-sourced".

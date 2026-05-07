@@ -169,6 +169,7 @@ doc_events = {
 	},
 	"Payment Entry": {
 		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.payment_entry.stamp_wave_order_id",
+		"before_submit": "wave_sync_hypa.wave_sync_hypa.handlers.payment_entry.validate_payment_before_submit",
 		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.payment_entry.on_payment_entry_submit",
 	},
 }
