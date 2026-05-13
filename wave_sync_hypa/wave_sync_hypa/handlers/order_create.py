@@ -98,7 +98,15 @@ def _resolve_customer_for_order(payload: dict) -> str:
 
 
 def _adapt_user_to_customer_payload(user: dict) -> dict:
-	"""Translate an order's `user` sub-object to the shape find_or_create_customer expects."""
+	"""Translate an order's `user` sub-object to the shape find_or_create_customer expects.
+
+	Forwards the B2B classification fields (customerType, companyName,
+	businessType, fiscalId/taxId, businessAddress, city) so a customer first
+	seen via an ORDER.CREATE webhook gets correctly classified instead of
+	defaulting to Individual + default_customer_group. b2c payloads are
+	unaffected — these fields will just be absent and the resolver returns
+	the same values as before.
+	"""
 	return {
 		"_id": user.get("_id"),
 		"firstName": user.get("firstName"),
@@ -107,6 +115,13 @@ def _adapt_user_to_customer_payload(user: dict) -> dict:
 		"mobilePhone": user.get("mobile") or user.get("mobilePhone"),
 		"isGuest": user.get("isGuest", False),
 		"integratorId": user.get("integratorId"),
+		"customerType": user.get("customerType"),
+		"companyName": user.get("companyName"),
+		"businessType": user.get("businessType"),
+		"businessAddress": user.get("businessAddress"),
+		"city": user.get("city"),
+		"fiscalId": user.get("fiscalId"),
+		"taxId": user.get("taxId"),
 	}
 
 

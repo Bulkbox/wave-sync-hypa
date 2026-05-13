@@ -9,6 +9,7 @@ import frappe
 from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_new
 from wave_sync_hypa.wave_sync_hypa.resolvers.contact_resolver import upsert_contact
 from wave_sync_hypa.wave_sync_hypa.resolvers.customer_resolver import (
+	append_business_address_if_present,
 	apply_customer_updates,
 	find_or_create_customer,
 )
@@ -49,6 +50,28 @@ def handle(payload: dict, correlation_id: str) -> None:
 
 	for wave_address in payload.get("addresses") or []:
 		_append_address(correlation_id, customer_name, wave_address, wave_id, wave_updated_at)
+
+	# B2B-only: businessAddress is a separate top-level field, not part of
+	# addresses[]. The resolver handles classification + idempotency; we just
+	# log the outcome the same way as a regular Wave address append.
+	business_result = append_business_address_if_present(customer_name, payload)
+	if business_result is not None:
+		address_name, created = business_result
+		log_step(
+			correlation_id,
+			"Resolved Customer",
+			"Info",
+			doc_type="CUSTOMER",
+			action="UPDATE",
+			wave_id=wave_id,
+			wave_updated_at=wave_updated_at,
+			linked_doctype="Address",
+			linked_docname=address_name or None,
+			response_body={
+				"kind": "business_address",
+				"created": created,
+			},
+		)
 
 
 def _is_guest_payload(payload: dict) -> bool:
