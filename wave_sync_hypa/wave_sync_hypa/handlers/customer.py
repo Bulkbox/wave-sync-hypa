@@ -22,8 +22,28 @@ def handle(payload: dict, correlation_id: str) -> None:
 	wave_id = payload.get("_id")
 	wave_updated_at = payload.get("updatedAt")
 
-	customer_name, created = find_or_create_customer(payload)
-	_log_customer_resolved(correlation_id, payload, customer_name, created)
+	customer_name, created, source = find_or_create_customer(payload)
+	_log_customer_resolved(correlation_id, payload, customer_name, created, source)
+	if source == "email":
+		# Adoption is rare and consequential — we just attached a new Wave id to
+		# an existing ERP customer. Emit a dedicated Warning row so adoption
+		# events are filterable in Wave Sync Log views, not buried in routine Info.
+		log_step(
+			correlation_id,
+			"Customer Adopted by Email",
+			"Warning",
+			doc_type="CUSTOMER",
+			action="UPDATE",
+			wave_id=wave_id,
+			wave_updated_at=wave_updated_at,
+			linked_doctype="Customer",
+			linked_docname=customer_name,
+			response_body={
+				"email": payload.get("email"),
+				"adopted_customer": customer_name,
+				"new_wave_customer_id": wave_id,
+			},
+		)
 
 	# Guest payloads route to the shared walk-in Customer. We must never mutate
 	# the walk-in record from a per-guest payload — that would overwrite its
@@ -80,9 +100,14 @@ def _is_guest_payload(payload: dict) -> bool:
 
 
 def _log_customer_resolved(
-	correlation_id: str, payload: dict, customer_name: str, created: bool
+	correlation_id: str, payload: dict, customer_name: str, created: bool, source: str,
 ) -> None:
-	"""Write one Resolved Customer log row recording whether the customer was new or existing."""
+	"""Write one Resolved Customer log row recording how the customer was resolved.
+
+	`source` distinguishes guest / primary wave_id / email-adoption / new — useful
+	when an unexpected duplicate appears and we need to trace back through Wave
+	Sync Log how the Customer was reached.
+	"""
 	log_step(
 		correlation_id,
 		"Resolved Customer",
@@ -93,7 +118,11 @@ def _log_customer_resolved(
 		wave_updated_at=payload.get("updatedAt"),
 		linked_doctype="Customer",
 		linked_docname=customer_name,
-		response_body={"created": created, "is_guest": bool(payload.get("isGuest"))},
+		response_body={
+			"created": created,
+			"is_guest": bool(payload.get("isGuest")),
+			"source": source,
+		},
 	)
 
 

@@ -48,17 +48,142 @@ def find_customer_by_wave_id(wave_customer_id: str | None) -> str | None:
 	return frappe.db.get_value("Customer", {"wave_customer_id": wave_customer_id}, "name")
 
 
-def find_or_create_customer(payload: dict) -> tuple[str, bool]:
-	"""Return (customer_name, created_flag). Guests resolve to the walk-in customer."""
+def find_customer_by_email(email: str | None, wave_customer_id: str | None) -> str | None:
+	"""Secondary lookup: find a Customer whose linked Contact carries this email.
+
+	Used as a fallback when the primary `wave_customer_id` lookup misses, so we
+	adopt an existing ERP record instead of creating a duplicate when Wave
+	emits a new `_id` for someone we already know (account reset, manual ERP
+	entry, etc.). Returns the Customer name only when adoption is safe; logs
+	and returns None when:
+
+	  * email is empty or whitespace-only,
+	  * the email matches multiple ERP customers (ambiguous — never pick one),
+	  * the single match is already linked to a different wave_customer_id
+	    (two distinct Wave accounts share an email; merging here would be
+	    lossy and silently re-assign delivery history to the wrong account).
+
+	Case-insensitive comparison via LOWER() so the match works regardless of
+	MySQL collation. The join walks Contact Email -> Dynamic Link -> Customer
+	because ERPNext Customer doesn't carry a top-level email field; email
+	lives on the Contact, which is linked back to the Customer through a
+	Dynamic Link row.
+	"""
+	email = (email or "").strip()
+	if not email:
+		return None
+
+	rows = frappe.db.sql(
+		"""
+		SELECT DISTINCT dl.link_name AS customer_name
+		FROM `tabContact Email` ce
+		JOIN `tabDynamic Link` dl
+		  ON dl.parent = ce.parent
+		 AND dl.parenttype = 'Contact'
+		WHERE LOWER(ce.email_id) = LOWER(%s)
+		  AND dl.link_doctype = 'Customer'
+		""",
+		(email,),
+		as_dict=True,
+	)
+	if not rows:
+		return None
+
+	# Strict: any time more than one ERP customer shares this email, the email
+	# is no longer a trustworthy dedup signal — even if only one of them is
+	# wave-linkage-safe. We decline and let the operator clean up the
+	# duplicates manually. The new Wave customer lands as a fresh record.
+	if len(rows) > 1:
+		frappe.log_error(
+			title="wave_sync_hypa: multiple ERP customers share an email",
+			message=(
+				f"Email '{email}' matches multiple ERP customers: "
+				f"{[r['customer_name'] for r in rows]}. Skipping email-based dedup so "
+				"we don't attach the new Wave id to the wrong record; a new ERP "
+				"Customer will be created. Merge the existing duplicates manually."
+			),
+		)
+		return None
+
+	candidate = rows[0]["customer_name"]
+	existing_wave_id = (
+		frappe.db.get_value("Customer", candidate, "wave_customer_id") or ""
+	).strip()
+	if existing_wave_id and existing_wave_id != (wave_customer_id or ""):
+		# The single ERP candidate is already linked to a different Wave account.
+		# Two distinct Wave accounts share an email — never silently merge them.
+		frappe.log_error(
+			title="wave_sync_hypa: email match has conflicting wave_customer_id",
+			message=(
+				f"Email '{email}' matches existing ERP customer '{candidate}' but it "
+				f"is already linked to Wave id '{existing_wave_id}'. New Wave id "
+				f"'{wave_customer_id}' will create a separate ERP Customer; merge "
+				"manually if these are the same human."
+			),
+		)
+		return None
+
+	return candidate
+
+
+def _stamp_wave_customer_id(customer_name: str, wave_customer_id: str | None) -> None:
+	"""Attach a Wave id to an existing Customer adopted via email match.
+
+	Uses `update_modified=False` so the doc's modified timestamp doesn't tick
+	(the subsequent apply_customer_updates already touches it). Skips silently
+	when wave_customer_id is empty — adoption without an id would be a no-op.
+	"""
+	if not wave_customer_id:
+		return
+	frappe.db.set_value(
+		"Customer",
+		customer_name,
+		"wave_customer_id",
+		wave_customer_id,
+		update_modified=False,
+	)
+
+
+def find_or_create_customer(payload: dict) -> tuple[str, bool, str]:
+	"""Return (customer_name, created_flag, source).
+
+	`source` is one of:
+	  - "guest"   : routed to the configured walk-in Customer; no identity write
+	  - "wave_id" : found by primary `wave_customer_id` lookup
+	  - "email"   : adopted an existing ERP Customer by email match; the new
+	                wave_customer_id has been stamped onto that record so the
+	                next call short-circuits on the primary lookup
+	  - "new"     : freshly inserted
+
+	The email branch is opt-in via Wave Settings.customer_email_fallback_enabled
+	(default off). When the setting is off, the waterfall is just wave_id ->
+	create — the original behaviour. When on, we adopt existing ERP customers
+	(manual entries, prior imports, Wave accounts re-registered under a new
+	`_id`). Safety branches in find_customer_by_email mean we never silently
+	merge ambiguous matches even when the setting is on.
+	"""
 	if _is_guest(payload):
-		return _get_walk_in_customer_name(), False
+		return _get_walk_in_customer_name(), False, "guest"
 
 	wave_customer_id = payload.get("_id")
 	existing = find_customer_by_wave_id(wave_customer_id)
 	if existing:
-		return existing, False
+		return existing, False, "wave_id"
 
-	return _create_customer_from_wave(payload), True
+	if _email_fallback_enabled():
+		by_email = find_customer_by_email(payload.get("email"), wave_customer_id)
+		if by_email:
+			_stamp_wave_customer_id(by_email, wave_customer_id)
+			return by_email, False, "email"
+
+	return _create_customer_from_wave(payload), True, "new"
+
+
+def _email_fallback_enabled() -> bool:
+	"""Read the Wave Settings switch that gates the email-based secondary lookup."""
+	return bool(
+		frappe.db.get_single_value("Wave Settings", "customer_email_fallback_enabled")
+	)
 
 
 def apply_customer_updates(customer_name: str, payload: dict) -> None:

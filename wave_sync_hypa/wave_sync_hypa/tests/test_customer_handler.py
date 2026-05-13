@@ -136,9 +136,10 @@ class TestCustomerHandler(FrappeTestCase):
 
 	def test_guest_payloads_route_to_walk_in_customer(self):
 		"""isGuest=true returns the walk-in customer name without creating a new Customer."""
-		customer_name, created = find_or_create_customer(self._payload(isGuest=True))
+		customer_name, created, source = find_or_create_customer(self._payload(isGuest=True))
 		self.assertEqual(customer_name, self.walk_in)
 		self.assertFalse(created)
+		self.assertEqual(source, "guest")
 		# Also: running the full handler with a guest payload does not create a Wave-linked Customer.
 		handle(self._payload(isGuest=True), self.correlation_id)
 		self.assertFalse(find_customer_by_wave_id(self.wave_customer_id))

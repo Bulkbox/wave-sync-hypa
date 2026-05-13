@@ -93,7 +93,7 @@ def _resolve_customer_for_order(payload: dict) -> str:
 	if not user.get("_id"):
 		raise WaveResolutionError("ORDER payload missing user._id; cannot resolve customer")
 	adapted = _adapt_user_to_customer_payload(user)
-	customer_name, _created = find_or_create_customer(adapted)
+	customer_name, _created, _source = find_or_create_customer(adapted)
 	return customer_name
 
 
