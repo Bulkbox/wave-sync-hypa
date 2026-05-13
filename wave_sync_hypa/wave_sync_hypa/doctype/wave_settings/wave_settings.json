@@ -8,6 +8,7 @@
  "field_order": [
   "integration_section",
   "enabled",
+  "customer_email_fallback_enabled",
   "column_break_integration",
   "price_scale_divisor",
   "log_retention_days",
@@ -52,6 +53,13 @@
    "fieldname": "enabled",
    "fieldtype": "Check",
    "label": "Integration Enabled"
+  },
+  {
+   "default": "0",
+   "description": "When on, customer resolution falls back to matching by email after the primary wave_customer_id lookup misses. Lets the integration adopt existing ERP customers (imported, manually entered, or re-registered under a new Wave _id) instead of creating duplicates. Strict: declines on ambiguous matches (multiple ERP customers share the email, or the single match is already linked to a different Wave id) and logs to the Frappe Error Log. Default off so existing sites keep the wave_id-only behaviour until ops opts in.",
+   "fieldname": "customer_email_fallback_enabled",
+   "fieldtype": "Check",
+   "label": "Customer Email Fallback Lookup Enabled"
   },
   {
    "fieldname": "column_break_integration",
