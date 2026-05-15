@@ -9,6 +9,9 @@
   "integration_section",
   "enabled",
   "customer_email_fallback_enabled",
+  "wave_intake_review_todo_enabled",
+  "wave_intake_review_assignee",
+  "wave_intake_review_role",
   "column_break_integration",
   "price_scale_divisor",
   "log_retention_days",
@@ -29,6 +32,7 @@
   "default_warehouse",
   "default_price_list",
   "default_currency",
+  "default_unresolved_items_placeholder",
   "column_break_erp_defaults",
   "default_customer_group",
   "default_territory",
@@ -60,6 +64,27 @@
    "fieldname": "customer_email_fallback_enabled",
    "fieldtype": "Check",
    "label": "Customer Email Fallback Lookup Enabled"
+  },
+  {
+   "default": "0",
+   "description": "When on, an SO drafted with wave_manual_review_required=1 (unresolved items, missing fee mappings, missing tax templates) also creates a Frappe ToDo so the team is pinged in 'My Tasks' without needing Wave Sync Log access. Recipient resolved from Assignee first, then Role. Default off.",
+   "fieldname": "wave_intake_review_todo_enabled",
+   "fieldtype": "Check",
+   "label": "Intake Review ToDo Enabled"
+  },
+  {
+   "description": "Single User to receive intake-review ToDos. Wins over the Role field below when set. Leave blank to fan out to every user in the configured Role instead.",
+   "fieldname": "wave_intake_review_assignee",
+   "fieldtype": "Link",
+   "label": "Intake Review Assignee",
+   "options": "User"
+  },
+  {
+   "description": "Role whose members receive intake-review ToDos when no single Assignee is set. One ToDo per user with this role.",
+   "fieldname": "wave_intake_review_role",
+   "fieldtype": "Link",
+   "label": "Intake Review Role",
+   "options": "Role"
   },
   {
    "fieldname": "column_break_integration",
@@ -189,6 +214,13 @@
    "fieldtype": "Link",
    "label": "Default Currency",
    "options": "Currency"
+  },
+  {
+   "description": "Placeholder Item used as the single fallback line when an ORDER.CREATE webhook arrives but ZERO of its Wave SKUs resolve to ERP Items. Without this set, such orders are aborted with a loud Error + ToDo. Recommended setup: create an Item named e.g. 'Wave Unresolved SKU Placeholder' with a parking income account; the SO it lands on will be flagged for manual review and re-keyed by the operator.",
+   "fieldname": "default_unresolved_items_placeholder",
+   "fieldtype": "Link",
+   "label": "Default Unresolved Items Placeholder",
+   "options": "Item"
   },
   {
    "fieldname": "column_break_erp_defaults",

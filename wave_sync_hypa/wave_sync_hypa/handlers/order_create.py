@@ -15,6 +15,7 @@ from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_n
 from wave_sync_hypa.wave_sync_hypa.resolvers.customer_resolver import find_or_create_customer
 from wave_sync_hypa.wave_sync_hypa.resolvers.fee_resolver import resolve_fee
 from wave_sync_hypa.wave_sync_hypa.resolvers.item_resolver import resolve_sku
+from wave_sync_hypa.wave_sync_hypa.services import intake_review_notifier
 from wave_sync_hypa.wave_sync_hypa.services.dispatcher import HANDLER_REGISTRY
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveResolutionError, WaveValidationError
@@ -48,11 +49,26 @@ def handle(payload: dict, correlation_id: str) -> None:
 
 	sales_order = _build_sales_order_header(settings, customer_name, shipping_address, payload, correlation_id)
 	skipped_tax = _apply_tax_template(sales_order, settings)
-	_append_product_lines(sales_order, payload, correlation_id)
+	skipped_items = _append_product_lines(sales_order, payload, correlation_id)
 	skipped_fees = _append_fee_lines(sales_order, payload, settings)
+
+	# Zero items resolved -> either fall back to a placeholder line or abort loudly.
+	if not sales_order.items and not _append_placeholder_for_unresolved(sales_order, settings):
+		_abort_intake_no_placeholder(payload, correlation_id, skipped_items)
+		intake_review_notifier.notify_intake_aborted(
+			settings, payload,
+			_summarise_intake_issues(skipped_items, skipped_fees, skipped_tax),
+		)
+		return
+
 	_apply_payment_metadata(sales_order, settings, payload, correlation_id)
+	_apply_wave_comments(sales_order, payload)
 	_persist_sales_order(sales_order)
 
+	if skipped_items:
+		_annotate_sales_order_for_skipped_items(
+			sales_order.name, payload, correlation_id, skipped_items
+		)
 	if skipped_fees:
 		_annotate_sales_order_for_skipped_fees(
 			sales_order.name, payload, correlation_id, skipped_fees
@@ -62,7 +78,26 @@ def handle(payload: dict, correlation_id: str) -> None:
 			sales_order.name, payload, correlation_id, skipped_tax
 		)
 
+	# Fire one ToDo for the team when any soft-fail flagged the SO for review.
+	if skipped_items or skipped_fees or skipped_tax:
+		intake_review_notifier.notify_sales_order_needs_review(
+			sales_order, settings,
+			_summarise_intake_issues(skipped_items, skipped_fees, skipped_tax),
+		)
+
 	_log_sales_order_created(correlation_id, payload, sales_order.name)
+
+
+def _summarise_intake_issues(skipped_items, skipped_fees, skipped_tax) -> str:
+	"""Build a short comma-separated summary for the ToDo description."""
+	parts = []
+	if skipped_items:
+		parts.append(f"{len(skipped_items)} unresolved item(s)")
+	if skipped_fees:
+		parts.append(f"{len(skipped_fees)} unmapped fee(s)")
+	if skipped_tax:
+		parts.append("tax template issue")
+	return ", ".join(parts) or "intake issue"
 
 
 def _require(payload: dict, key: str):
@@ -196,20 +231,59 @@ def _validate_tax_template(template_name: str) -> str | None:
 	return None
 
 
-def _append_product_lines(sales_order, payload: dict, correlation_id: str) -> None:
-	"""Add one Sales Order item row per Wave product; pricing auto-populates from the Price List."""
+def _append_product_lines(sales_order, payload: dict, correlation_id: str) -> list[dict]:
+	"""Append resolvable Wave products as SO line items; return details of products that could not resolve.
+
+	Mirrors _append_fee_lines: missing Item mappings are non-fatal here so an order
+	with 1 unresolvable SKU out of 3 still produces a draft SO carrying the 2 that
+	resolved, instead of vanishing silently. The caller decides what to do when the
+	whole order failed to resolve (see _append_placeholder_for_unresolved).
+	"""
+	skipped: list[dict] = []
 	for product in payload.get("products") or []:
-		sku = product.get("sku") or product.get("integratorId")
-		item_code = resolve_sku(sku)
-		sales_order.append(
-			"items",
-			{
-				"item_code": item_code,
-				"qty": product.get("quantity") or 1,
-				"delivery_date": sales_order.delivery_date,
-			},
-		)
+		sku = (product.get("sku") or product.get("integratorId") or "").strip()
+		try:
+			item_code = resolve_sku(sku)
+		except WaveResolutionError as exc:
+			skipped.append(_unresolved_product_entry(sku, product, exc))
+			continue
+		sales_order.append("items", _build_item_line(item_code, product, sales_order))
 	_log_items_resolved(correlation_id, payload, len(sales_order.items))
+	return skipped
+
+
+def _build_item_line(item_code: str, product: dict, sales_order) -> dict:
+	"""Shape a Sales Order item dict from a resolved Wave product line."""
+	return {
+		"item_code": item_code,
+		"qty": product.get("quantity") or 1,
+		"delivery_date": sales_order.delivery_date,
+	}
+
+
+def _unresolved_product_entry(sku: str, product: dict, exc: Exception) -> dict:
+	"""Capture an unresolvable Wave product line for downstream comments + ToDos."""
+	return {
+		"sku": sku,
+		"quantity": product.get("quantity") or 1,
+		"wave_product_id": product.get("productId"),
+		"error": str(exc),
+	}
+
+
+def _append_placeholder_for_unresolved(sales_order, settings) -> bool:
+	"""Append a single placeholder line when zero Wave items resolved; return False if no placeholder configured."""
+	placeholder = (settings.get("default_unresolved_items_placeholder") or "").strip()
+	if not placeholder or not frappe.db.exists("Item", placeholder):
+		return False
+	sales_order.append("items", {
+		"item_code": placeholder,
+		"qty": 1,
+		"rate": 0,
+		"delivery_date": sales_order.delivery_date,
+		"description": "Wave order had no resolvable items — see Comments for the unresolved SKUs.",
+	})
+	return True
 
 
 def _append_fee_lines(sales_order, payload: dict, settings) -> list[dict]:
@@ -364,6 +438,11 @@ def _derive_payment_state(classification: str, payment_status: str) -> str | Non
 	return None
 
 
+def _apply_wave_comments(sales_order, payload: dict) -> None:
+	"""Stamp Wave's order-level `comments` (delivery notes, special requests) onto the SO."""
+	sales_order.wave_comments = (payload.get("comments") or "").strip() or None
+
+
 def _persist_sales_order(sales_order) -> None:
 	"""Insert the Sales Order as a draft, respecting permissions but skipping mandatory checks."""
 	sales_order.flags.ignore_mandatory = True
@@ -425,6 +504,126 @@ def _log_sales_order_created(correlation_id: str, payload: dict, sales_order_nam
 		friendly_id=payload.get("friendlyId"),
 		linked_doctype="Sales Order",
 		linked_docname=sales_order_name,
+	)
+
+
+def _annotate_sales_order_for_skipped_items(
+	sales_order_name: str,
+	payload: dict,
+	correlation_id: str,
+	skipped: list[dict],
+) -> None:
+	"""Flag the SO for manual review, log each unresolved item, and attach a human-readable Comment."""
+	_flag_manual_review(sales_order_name)
+	_log_skipped_items(correlation_id, payload, sales_order_name, skipped)
+	_add_skipped_items_comment(sales_order_name, payload, correlation_id, skipped)
+
+
+def _log_skipped_items(
+	correlation_id: str,
+	payload: dict,
+	sales_order_name: str,
+	skipped: list[dict],
+) -> None:
+	"""Write one Action Required log row per unresolved Wave product."""
+	for entry in skipped:
+		log_step(
+			correlation_id,
+			"Action Required",
+			"Warning",
+			doc_type="ORDER",
+			action="CREATE",
+			wave_id=payload.get("_id"),
+			wave_updated_at=payload.get("updatedAt"),
+			friendly_id=payload.get("friendlyId"),
+			linked_doctype="Sales Order",
+			linked_docname=sales_order_name,
+			error_message=(entry.get("error") or "")[:500],
+			response_body={
+				"sku": entry.get("sku"),
+				"quantity": entry.get("quantity"),
+				"wave_product_id": entry.get("wave_product_id"),
+				"resolution": (
+					"Add the missing Item in ERP, then either add the line to this Sales "
+					"Order manually or cancel and re-trigger the ORDER webhook from Wave."
+				),
+			},
+		)
+
+
+def _add_skipped_items_comment(
+	sales_order_name: str,
+	payload: dict,
+	correlation_id: str,
+	skipped: list[dict],
+) -> None:
+	"""Attach a single Comment to the SO enumerating every unresolvable Wave SKU."""
+	doc = frappe.get_doc("Sales Order", sales_order_name)
+	doc.add_comment("Comment", _build_skipped_items_comment_html(payload, correlation_id, skipped))
+
+
+def _build_skipped_items_comment_html(
+	payload: dict,
+	correlation_id: str,
+	skipped: list[dict],
+) -> str:
+	"""Render the Comment body listing each unresolved SKU and the fix steps."""
+	rows = "".join(_render_skipped_item_row(entry) for entry in skipped)
+	return (
+		"<div><b>Wave Sync &mdash; manual review required.</b></div>"
+		f"<div>{len(skipped)} Wave product line(s) could not be added to this Sales "
+		"Order because the SKU is not present (or is disabled) in ERP's Item master.</div>"
+		f"<ul>{rows}</ul>"
+		"<div><b>To resolve:</b></div>"
+		"<ol>"
+		"<li>Open <i>Item</i> and add (or enable) the missing SKU(s) above.</li>"
+		"<li>Add the missing line(s) to this Sales Order manually with the quantities listed.</li>"
+		"<li>Clear the <i>Wave Manual Review Required</i> flag on this Sales Order.</li>"
+		"</ol>"
+		f"<div><b>Wave order:</b> {escape_html(payload.get('friendlyId') or '—')} "
+		f"(ID: {escape_html(payload.get('_id') or '—')})<br>"
+		f"<b>Correlation:</b> {escape_html(correlation_id)}</div>"
+	)
+
+
+def _render_skipped_item_row(entry: dict) -> str:
+	"""Render one <li> describing a single unresolved Wave SKU."""
+	return (
+		"<li><b>SKU {sku}</b> (qty: {qty}, Wave productId: {wave_product_id}): {error}</li>"
+	).format(
+		sku=escape_html(entry.get("sku") or "(unknown)"),
+		qty=escape_html(str(entry.get("quantity") or 0)),
+		wave_product_id=escape_html(entry.get("wave_product_id") or "—"),
+		error=escape_html(entry.get("error") or ""),
+	)
+
+
+def _abort_intake_no_placeholder(
+	payload: dict,
+	correlation_id: str,
+	skipped_items: list[dict],
+) -> None:
+	"""Log the intake abort when zero items resolved AND no placeholder Item is configured."""
+	skus = ", ".join(e.get("sku") or "?" for e in skipped_items) or "(none reported)"
+	error_message = (
+		"All Wave product SKUs were unresolvable AND no "
+		"Wave Settings.default_unresolved_items_placeholder is configured; "
+		f"the Sales Order was NOT created. Unresolved SKUs: {skus}."
+	)
+	log_step(
+		correlation_id,
+		"Aborted",
+		"Error",
+		doc_type="ORDER",
+		action="CREATE",
+		wave_id=payload.get("_id"),
+		wave_updated_at=payload.get("updatedAt"),
+		friendly_id=payload.get("friendlyId"),
+		error_message=error_message,
+	)
+	frappe.log_error(
+		title="wave_sync_hypa: intake aborted — no placeholder Item configured",
+		message=error_message,
 	)
 
 
