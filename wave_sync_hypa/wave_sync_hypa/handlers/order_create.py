@@ -15,6 +15,7 @@ from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_n
 from wave_sync_hypa.wave_sync_hypa.resolvers.customer_resolver import find_or_create_customer
 from wave_sync_hypa.wave_sync_hypa.resolvers.fee_resolver import resolve_fee
 from wave_sync_hypa.wave_sync_hypa.resolvers.item_resolver import resolve_sku
+from wave_sync_hypa.wave_sync_hypa.services import intake_review_notifier
 from wave_sync_hypa.wave_sync_hypa.services.dispatcher import HANDLER_REGISTRY
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveResolutionError, WaveValidationError
@@ -54,6 +55,10 @@ def handle(payload: dict, correlation_id: str) -> None:
 	# Zero items resolved -> either fall back to a placeholder line or abort loudly.
 	if not sales_order.items and not _append_placeholder_for_unresolved(sales_order, settings):
 		_abort_intake_no_placeholder(payload, correlation_id, skipped_items)
+		intake_review_notifier.notify_intake_aborted(
+			settings, payload,
+			_summarise_intake_issues(skipped_items, skipped_fees, skipped_tax),
+		)
 		return
 
 	_apply_payment_metadata(sales_order, settings, payload, correlation_id)
@@ -73,7 +78,26 @@ def handle(payload: dict, correlation_id: str) -> None:
 			sales_order.name, payload, correlation_id, skipped_tax
 		)
 
+	# Fire one ToDo for the team when any soft-fail flagged the SO for review.
+	if skipped_items or skipped_fees or skipped_tax:
+		intake_review_notifier.notify_sales_order_needs_review(
+			sales_order, settings,
+			_summarise_intake_issues(skipped_items, skipped_fees, skipped_tax),
+		)
+
 	_log_sales_order_created(correlation_id, payload, sales_order.name)
+
+
+def _summarise_intake_issues(skipped_items, skipped_fees, skipped_tax) -> str:
+	"""Build a short comma-separated summary for the ToDo description."""
+	parts = []
+	if skipped_items:
+		parts.append(f"{len(skipped_items)} unresolved item(s)")
+	if skipped_fees:
+		parts.append(f"{len(skipped_fees)} unmapped fee(s)")
+	if skipped_tax:
+		parts.append("tax template issue")
+	return ", ".join(parts) or "intake issue"
 
 
 def _require(payload: dict, key: str):
