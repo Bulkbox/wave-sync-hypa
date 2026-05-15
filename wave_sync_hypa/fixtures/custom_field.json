@@ -325,6 +325,16 @@
  },
  {
   "doctype": "Custom Field",
+  "dt": "Sales Order",
+  "fieldname": "wave_customer_notes_section_end",
+  "fieldtype": "Section Break",
+  "insert_after": "wave_comments",
+  "modified": "2026-05-15 00:00:00",
+  "name": "Sales Order-wave_customer_notes_section_end",
+  "translatable": 0
+ },
+ {
+  "doctype": "Custom Field",
   "dt": "Pick List",
   "fieldname": "wave_order_id",
   "fieldtype": "Data",
