@@ -292,11 +292,27 @@ class TestOrderCreate(FrappeTestCase):
 		)
 		self.assertGreaterEqual(len(skipped), 1)
 
-	def test_missing_sku_raises_resolution_error(self):
-		"""A product whose SKU is not in ERP raises a WaveResolutionError (processor logs Failed)."""
+	def test_missing_sku_aborts_when_no_placeholder_configured(self):
+		"""All-items-unresolved with no placeholder: no SO created, abort logged."""
 		payload = self._payload(products=[{"sku": "NOT_A_REAL_SKU", "quantity": 1}])
-		with self.assertRaises(WaveResolutionError):
-			handle(payload, self.correlation_id)
+		# Ensure the placeholder setting is empty for this test.
+		frappe.db.set_value(
+			"Wave Settings", "Wave Settings",
+			"default_unresolved_items_placeholder", None, update_modified=False,
+		)
+		handle(payload, self.correlation_id)
+		# No Sales Order should have been created for this wave_order_id.
+		self.assertIsNone(
+			frappe.db.get_value("Sales Order", {"wave_order_id": self.wave_order_id}, "name")
+		)
+		# The abort path must write an "Aborted" Error row to Wave Sync Log.
+		self.assertTrue(
+			frappe.db.exists(
+				"Wave Sync Log",
+				{"correlation_id": self.correlation_id, "step": "Aborted", "level": "Error"},
+			),
+			"Expected an Aborted/Error Wave Sync Log row.",
+		)
 
 	def test_missing_fee_mapping_still_creates_draft_sales_order(self):
 		"""Unmapped fee: SO drafts with products only; the unmapped fee line is absent, no raise."""
