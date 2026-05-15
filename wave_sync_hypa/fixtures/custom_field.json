@@ -298,6 +298,32 @@
   "translatable": 0
  },
  {
+  "collapsible": 1,
+  "doctype": "Custom Field",
+  "dt": "Sales Order",
+  "fieldname": "wave_customer_notes_section",
+  "fieldtype": "Section Break",
+  "insert_after": "wave_additional_payment_hold",
+  "label": "Wave Customer Notes",
+  "modified": "2026-05-15 00:00:00",
+  "name": "Sales Order-wave_customer_notes_section",
+  "translatable": 0
+ },
+ {
+  "description": "Free-text customer message Wave attached to the order (e.g. delivery instructions). Read-only; stamped from payload.comments at intake.",
+  "doctype": "Custom Field",
+  "dt": "Sales Order",
+  "fieldname": "wave_comments",
+  "fieldtype": "Long Text",
+  "insert_after": "wave_customer_notes_section",
+  "label": "Wave Customer Comments",
+  "modified": "2026-05-15 00:00:00",
+  "name": "Sales Order-wave_comments",
+  "no_copy": 1,
+  "read_only": 1,
+  "translatable": 0
+ },
+ {
   "doctype": "Custom Field",
   "dt": "Pick List",
   "fieldname": "wave_order_id",

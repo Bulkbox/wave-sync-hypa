@@ -51,6 +51,7 @@ def handle(payload: dict, correlation_id: str) -> None:
 	_append_product_lines(sales_order, payload, correlation_id)
 	skipped_fees = _append_fee_lines(sales_order, payload, settings)
 	_apply_payment_metadata(sales_order, settings, payload, correlation_id)
+	_apply_wave_comments(sales_order, payload)
 	_persist_sales_order(sales_order)
 
 	if skipped_fees:
@@ -362,6 +363,11 @@ def _derive_payment_state(classification: str, payment_status: str) -> str | Non
 	if classification == "cod":
 		return "Awaiting Cash on Delivery"
 	return None
+
+
+def _apply_wave_comments(sales_order, payload: dict) -> None:
+	"""Stamp Wave's order-level `comments` (delivery notes, special requests) onto the SO."""
+	sales_order.wave_comments = (payload.get("comments") or "").strip() or None
 
 
 def _persist_sales_order(sales_order) -> None:
