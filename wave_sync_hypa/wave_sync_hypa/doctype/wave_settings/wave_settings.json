@@ -9,6 +9,7 @@
   "integration_section",
   "enabled",
   "customer_email_fallback_enabled",
+  "pick_list_inbound_submit_enabled",
   "wave_intake_review_todo_enabled",
   "wave_intake_review_assignee",
   "wave_intake_review_role",
@@ -64,6 +65,13 @@
    "fieldname": "customer_email_fallback_enabled",
    "fieldtype": "Check",
    "label": "Customer Email Fallback Lookup Enabled"
+  },
+  {
+   "default": "0",
+   "description": "When on, ORDER.UPDATE webhooks with pickerStatus=COLLECTED reconcile the ERP Pick List (set picked_qty + batch_no from Wave's payload) and auto-submit any Pick List in Draft state. Submitted/cancelled Pick Lists are annotated with Wave's reported pick state via Frappe Comments only; their docstatus is never touched. Submit happens through the existing Pick List Wave Override permission gate via the inbound flag. Default off so existing sites are no-ops until ops opts in.",
+   "fieldname": "pick_list_inbound_submit_enabled",
+   "fieldtype": "Check",
+   "label": "Pick List Inbound Submit Enabled"
   },
   {
    "default": "0",
