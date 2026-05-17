@@ -9,3 +9,4 @@ code, which populates the registry.
 
 from . import customer  # noqa: F401
 from . import order_create  # noqa: F401
+from . import order_update  # noqa: F401

@@ -1,0 +1,366 @@
+"""Inbound handler for Wave's ORDER.UPDATE webhook.
+
+Wave fires ORDER.UPDATE for many reasons; this handler reacts only when
+`pickerStatus == "COLLECTED"` — the moment the picker app marks the order
+as picked. Every other ORDER.UPDATE is logged as Info and ignored, so
+this module is safe to wire even though it only handles one transition.
+
+Behaviour by Pick List docstatus:
+
+  0 (Draft)      Update picked_qty + batch_no on matching rows, add picker
+                 audit + anomaly Comments, propagate the customer comment,
+                 then submit through the existing wave_inbound_pick_list_submit
+                 flag seam. Submit is suppressed when any item is REPLACED —
+                 operator review required.
+
+  1 (Submitted)  Add a single Wave-pick summary Comment; do NOT touch state.
+  2 (Cancelled)  Add a single Wave-pick summary Comment; do NOT touch state.
+
+For all three branches the customer comment, if present in the payload, is
+mirrored as a Frappe Comment on both the Pick List AND the linked Sales
+Order with a "Customer now asks:" prefix. The intake-time SO.wave_comments
+field is left untouched so the original-vs-updated history is preserved.
+"""
+
+from __future__ import annotations
+
+import frappe
+
+from wave_sync_hypa.wave_sync_hypa.services.dispatcher import HANDLER_REGISTRY
+from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+
+STEP_NOT_COLLECTED = "pick_list_inbound_picker_not_collected"
+STEP_DISABLED = "pick_list_inbound_submit_disabled"
+STEP_NO_PICK_LIST = "pick_list_inbound_no_pick_list"
+STEP_DRAFT_SUBMITTED = "pick_list_inbound_pick_list_submitted"
+STEP_SUBMIT_FAILED = "pick_list_inbound_submit_failed"
+STEP_REPLACEMENT_PRESENT = "pick_list_inbound_replacement_present"
+STEP_ANNOTATED_SUBMITTED = "pick_list_inbound_annotated_submitted_pl"
+STEP_ANNOTATED_CANCELLED = "pick_list_inbound_annotated_cancelled_pl"
+
+
+def handle(payload: dict, correlation_id: str) -> None:
+	"""Entry point for ORDER.UPDATE webhooks; filter, fan out across linked Pick Lists."""
+	if not _is_picking_complete_signal(payload):
+		_log_ignored_not_collected(payload, correlation_id)
+		return
+	settings = frappe.get_cached_doc("Wave Settings")
+	if not _inbound_submit_enabled(settings):
+		_log_ignored_disabled(payload, correlation_id)
+		return
+	wave_order_id = (payload.get("_id") or "").strip()
+	pick_list_names = _find_pick_lists_for_wave_order(wave_order_id)
+	if not pick_list_names:
+		_log_no_matching_pick_list(payload, correlation_id, wave_order_id)
+		return
+	index = _build_wave_picking_index(payload)
+	for name in pick_list_names:
+		_process_pick_list(name, payload, correlation_id, index)
+
+
+def _is_picking_complete_signal(payload: dict) -> bool:
+	"""Return True only when Wave's pickerStatus reads COLLECTED."""
+	return (payload.get("pickerStatus") or "").strip().upper() == "COLLECTED"
+
+
+def _inbound_submit_enabled(settings) -> bool:
+	"""Return True when the master kill-switch is on in Wave Settings."""
+	return bool(settings.get("pick_list_inbound_submit_enabled"))
+
+
+def _find_pick_lists_for_wave_order(wave_order_id: str) -> list[str]:
+	"""Return Pick List names linked to this Wave order regardless of docstatus."""
+	if not wave_order_id:
+		return []
+	return frappe.get_all(
+		"Pick List",
+		filters={"wave_order_id": wave_order_id},
+		pluck="name",
+	)
+
+
+def _build_wave_picking_index(payload: dict) -> dict[str, dict]:
+	"""Cross-reference products[] with picking.items[]; key by sku for locations[] matching."""
+	products_by_id = {
+		(p.get("productId") or ""): p
+		for p in payload.get("products") or []
+	}
+	picking_items = (payload.get("picking") or {}).get("items") or []
+	index: dict[str, dict] = {}
+	for item in picking_items:
+		product_id = item.get("productId") or ""
+		product = products_by_id.get(product_id) or {}
+		sku = (product.get("sku") or product.get("integratorId") or "").strip()
+		if not sku:
+			continue
+		index[sku] = {
+			"quantity": float(item.get("quantity") or 0),
+			"batch_ids": list(product.get("batchIds") or []),
+			"status": (item.get("status") or "").strip().upper(),
+			"replacements": list(item.get("replacements") or []),
+			"wave_product_id": product_id,
+		}
+	return index
+
+
+def _process_pick_list(name: str, payload: dict, correlation_id: str, index: dict[str, dict]) -> None:
+	"""Branch on docstatus; submitted/cancelled get annotations only."""
+	doc = frappe.get_doc("Pick List", name)
+	if doc.docstatus == 1:
+		_annotate_terminal_pick_list(doc, payload, correlation_id, index, "submitted", STEP_ANNOTATED_SUBMITTED)
+		return
+	if doc.docstatus == 2:
+		_annotate_terminal_pick_list(doc, payload, correlation_id, index, "cancelled", STEP_ANNOTATED_CANCELLED)
+		return
+	_process_draft_pick_list(doc, payload, correlation_id, index)
+
+
+def _annotate_terminal_pick_list(
+	doc, payload: dict, correlation_id: str, index: dict[str, dict],
+	state_label: str, step: str,
+) -> None:
+	"""Add a summary Comment on a submitted/cancelled Pick List without touching state."""
+	doc.add_comment("Comment", _build_terminal_summary_html(payload, index, state_label))
+	_maybe_propagate_customer_comment_to_pick_list(doc, payload)
+	_maybe_propagate_customer_comment_to_sales_order(doc, payload)
+	log_step(
+		correlation_id, step, "Info",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		linked_doctype="Pick List",
+		linked_docname=doc.name,
+		response_body={"state": state_label, "items_reported": len(index)},
+	)
+
+
+def _process_draft_pick_list(doc, payload: dict, correlation_id: str, index: dict[str, dict]) -> None:
+	"""Update + comment + submit a Draft Pick List; skip submit when any REPLACED item is present."""
+	anomalies = _apply_wave_picking_to_locations(doc, index)
+	_add_picker_audit_comment(doc, payload)
+	for anomaly in anomalies:
+		doc.add_comment("Comment", anomaly)
+	_maybe_propagate_customer_comment_to_pick_list(doc, payload)
+	_maybe_propagate_customer_comment_to_sales_order(doc, payload)
+
+	if _has_replacements(index):
+		_add_replacement_review_comments(doc, index)
+		_save_without_submit(doc)
+		_log_replacement_present(doc, payload, correlation_id, index)
+		return
+
+	_submit_pick_list_with_inbound_flag(doc, payload, correlation_id)
+
+
+def _apply_wave_picking_to_locations(doc, index: dict[str, dict]) -> list[str]:
+	"""Stamp picked_qty + batch_no on matching rows; return anomaly comment strings."""
+	anomalies: list[str] = []
+	seen_skus: set[str] = set()
+	for row in doc.locations or []:
+		sku = (row.item_code or "").strip()
+		wave = index.get(sku)
+		if not wave:
+			continue
+		seen_skus.add(sku)
+		if wave["status"] == "REMOVED":
+			row.picked_qty = 0
+			anomalies.append(f"Wave reported SKU {sku} as REMOVED; picked_qty set to 0.")
+			continue
+		row.picked_qty = wave["quantity"]
+		batch_ids = wave["batch_ids"]
+		if batch_ids:
+			row.batch_no = batch_ids[0]
+			if len(batch_ids) > 1:
+				anomalies.append(
+					f"Wave reported SKU {sku} from multiple batches {batch_ids}; "
+					"first batch stamped, operator review needed for the rest."
+				)
+	for sku in index:
+		if sku not in seen_skus:
+			anomalies.append(
+				f"Wave reported a pick for SKU {sku} but this Pick List has no matching line."
+			)
+	return anomalies
+
+
+def _has_replacements(index: dict[str, dict]) -> bool:
+	"""Return True when any item in the Wave picking index has a non-empty replacements[]."""
+	return any(item["replacements"] for item in index.values())
+
+
+def _add_replacement_review_comments(doc, index: dict[str, dict]) -> None:
+	"""Add one Comment per replacement so the operator sees exactly what to reconcile."""
+	for sku, wave in index.items():
+		for replacement in wave["replacements"]:
+			with_id = (replacement.get("withProductId") or "(unknown)").strip()
+			qty = replacement.get("quantity") or 0
+			doc.add_comment(
+				"Comment",
+				f"Wave picker substituted SKU {sku} with productId {with_id} "
+				f"(qty {qty}). Auto-submit suppressed — operator review required.",
+			)
+
+
+def _add_picker_audit_comment(doc, payload: dict) -> None:
+	"""Append a Comment recording who picked + when + Wave's correlation id."""
+	picking = payload.get("picking") or {}
+	user = picking.get("assignedToUser") or {}
+	picker = " ".join(p for p in (user.get("firstName"), user.get("lastName")) if p) or "(unknown picker)"
+	email = user.get("email") or ""
+	completed_at = picking.get("completedAt") or ""
+	doc.add_comment(
+		"Comment",
+		f"Picked by {picker} ({email}) on {completed_at} per Wave order "
+		f"{payload.get('friendlyId') or payload.get('_id')}.",
+	)
+
+
+def _maybe_propagate_customer_comment_to_pick_list(doc, payload: dict) -> None:
+	"""Mirror the customer note onto the Pick List with a 'now asks' prefix; no-op when empty."""
+	text = (payload.get("comments") or "").strip()
+	if not text:
+		return
+	doc.add_comment("Comment", f"Customer now asks: {text}")
+
+
+def _maybe_propagate_customer_comment_to_sales_order(pick_list_doc, payload: dict) -> None:
+	"""Mirror the customer note onto every Sales Order linked through Pick List.locations[]."""
+	text = (payload.get("comments") or "").strip()
+	if not text:
+		return
+	so_names = {
+		(row.sales_order or "").strip()
+		for row in pick_list_doc.locations or []
+		if (row.sales_order or "").strip()
+	}
+	for so_name in so_names:
+		so = frappe.get_doc("Sales Order", so_name)
+		so.add_comment("Comment", f"Customer now asks: {text}")
+
+
+def _save_without_submit(doc) -> None:
+	"""Persist line + comment edits on a Draft Pick List, bypassing permission checks."""
+	doc.flags.ignore_permissions = True
+	doc.save()
+
+
+def _submit_pick_list_with_inbound_flag(doc, payload: dict, correlation_id: str) -> None:
+	"""Save + submit a Draft Pick List, bypassing the human-only permission gate via the flag seam."""
+	frappe.flags.wave_inbound_pick_list_submit = True
+	try:
+		doc.flags.ignore_permissions = True
+		doc.save()
+		doc.submit()
+		_log_submitted(doc, payload, correlation_id)
+	except Exception as exc:
+		frappe.db.rollback()
+		_log_submit_failed(doc, payload, correlation_id, exc)
+	finally:
+		frappe.flags.pop("wave_inbound_pick_list_submit", None)
+
+
+def _build_terminal_summary_html(payload: dict, index: dict[str, dict], state_label: str) -> str:
+	"""Render the single Comment body that documents Wave's pick state for an already-terminal PL."""
+	rows = "".join(
+		"<li><b>SKU {sku}</b>: qty {qty} status {status} batches [{batches}]</li>".format(
+			sku=sku,
+			qty=wave["quantity"],
+			status=wave["status"] or "—",
+			batches=", ".join(wave["batch_ids"]) or "—",
+		)
+		for sku, wave in index.items()
+	)
+	return (
+		f"<div><b>Wave reported picking-complete</b> after this Pick List "
+		f"was {state_label} in ERP. Pick List state is unchanged; Wave-side pick:</div>"
+		f"<ul>{rows}</ul>"
+		f"<div>Wave order: {_payload_id_summary(payload)}</div>"
+	)
+
+
+def _payload_id_summary(payload: dict) -> str:
+	"""Short label combining friendlyId + Wave _id for Comment footers."""
+	return f"{payload.get('friendlyId') or '—'} (ID: {payload.get('_id') or '—'})"
+
+
+def _log_ignored_not_collected(payload: dict, correlation_id: str) -> None:
+	"""Audit row for ORDER.UPDATE webhooks that aren't picking-complete signals."""
+	log_step(
+		correlation_id, STEP_NOT_COLLECTED, "Info",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		response_body={"pickerStatus": payload.get("pickerStatus")},
+	)
+
+
+def _log_ignored_disabled(payload: dict, correlation_id: str) -> None:
+	"""Audit row for the kill-switch-off short circuit."""
+	log_step(
+		correlation_id, STEP_DISABLED, "Info",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		error_message="pick_list_inbound_submit_enabled is off; skipping.",
+	)
+
+
+def _log_no_matching_pick_list(payload: dict, correlation_id: str, wave_order_id: str) -> None:
+	"""Audit row when no ERP Pick List references this Wave order."""
+	log_step(
+		correlation_id, STEP_NO_PICK_LIST, "Warning",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		error_message=(
+			f"No ERP Pick List linked to Wave order {wave_order_id}. The Pick List may not "
+			"have been created yet, or the wave_order_id link is missing."
+		),
+	)
+
+
+def _log_submitted(doc, payload: dict, correlation_id: str) -> None:
+	"""Success audit row for the Draft -> Submitted transition."""
+	log_step(
+		correlation_id, STEP_DRAFT_SUBMITTED, "Success",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		linked_doctype="Pick List",
+		linked_docname=doc.name,
+	)
+
+
+def _log_submit_failed(doc, payload: dict, correlation_id: str, exc: Exception) -> None:
+	"""Error audit row when Pick List submit raises."""
+	log_step(
+		correlation_id, STEP_SUBMIT_FAILED, "Error",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		linked_doctype="Pick List",
+		linked_docname=doc.name,
+		error_message=str(exc),
+		stack_trace=frappe.get_traceback(),
+	)
+
+
+def _log_replacement_present(doc, payload: dict, correlation_id: str, index: dict[str, dict]) -> None:
+	"""Warning audit row when REPLACEMENT suppresses auto-submit."""
+	replacement_skus = [sku for sku, wave in index.items() if wave["replacements"]]
+	log_step(
+		correlation_id, STEP_REPLACEMENT_PRESENT, "Warning",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		linked_doctype="Pick List",
+		linked_docname=doc.name,
+		response_body={"replacement_skus": replacement_skus},
+		error_message=(
+			"Wave reported replacements; non-replaced lines updated + commented, "
+			"but auto-submit was suppressed. Operator review required."
+		),
+	)
+
+
+HANDLER_REGISTRY["order_update"] = handle
