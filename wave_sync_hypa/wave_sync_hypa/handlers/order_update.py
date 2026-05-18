@@ -239,14 +239,36 @@ def _maybe_propagate_customer_comment_to_sales_order(pick_list_doc, payload: dic
 
 
 def _save_without_submit(doc) -> None:
-	"""Persist line + comment edits on a Draft Pick List, bypassing permission checks."""
-	doc.flags.ignore_permissions = True
-	doc.save()
+	"""Persist line + comment edits on a Draft Pick List, bypassing permission checks.
+
+	Pick List's pre-submit lifecycle can create nested docs (Stock Reservation
+	Entries, etc.) whose permission check consults frappe.flags.ignore_permissions.
+	Set the global flag in addition to the doc-level one and restore in finally.
+	"""
+	previous = frappe.flags.get("ignore_permissions")
+	frappe.flags.ignore_permissions = True
+	try:
+		doc.flags.ignore_permissions = True
+		doc.save()
+	finally:
+		frappe.flags.ignore_permissions = previous
 
 
 def _submit_pick_list_with_inbound_flag(doc, payload: dict, correlation_id: str) -> None:
-	"""Save + submit a Draft Pick List, bypassing the human-only permission gate via the flag seam."""
+	"""Save + submit a Draft Pick List, bypassing the human-only permission gate via the flag seam.
+
+	Pick List's on_submit hook creates nested docs — most importantly a Serial and
+	Batch Bundle for batch-tracked picks — and each nested insert runs its own
+	permission check via frappe.permissions.has_permission. That module-level
+	check honours frappe.flags.ignore_permissions but NOT a doc-level flag on the
+	parent, so we set both: the global flag for the cascade, and the doc-level
+	flag for the parent's own check. Both are restored in finally so the
+	bypass never leaks past this call.
+	"""
+	previous_inbound = frappe.flags.get("wave_inbound_pick_list_submit")
+	previous_ignore = frappe.flags.get("ignore_permissions")
 	frappe.flags.wave_inbound_pick_list_submit = True
+	frappe.flags.ignore_permissions = True
 	try:
 		doc.flags.ignore_permissions = True
 		doc.save()
@@ -256,7 +278,8 @@ def _submit_pick_list_with_inbound_flag(doc, payload: dict, correlation_id: str)
 		frappe.db.rollback()
 		_log_submit_failed(doc, payload, correlation_id, exc)
 	finally:
-		frappe.flags.pop("wave_inbound_pick_list_submit", None)
+		frappe.flags.wave_inbound_pick_list_submit = previous_inbound
+		frappe.flags.ignore_permissions = previous_ignore
 
 
 def _build_terminal_summary_html(payload: dict, index: dict[str, dict], state_label: str) -> str:

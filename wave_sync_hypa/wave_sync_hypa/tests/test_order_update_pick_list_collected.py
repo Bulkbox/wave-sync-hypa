@@ -219,9 +219,34 @@ class TestDraftPickList(FrappeTestCase):
 			patch.object(ou, "log_step") as mock_log,
 		):
 			ou.handle(_payload(), "corr-9")
+		# Both flags must be cleared regardless of submit failure.
 		self.assertFalse(frappe.flags.get("wave_inbound_pick_list_submit"))
+		self.assertFalse(frappe.flags.get("ignore_permissions"))
 		steps = [c.args[1] for c in mock_log.call_args_list]
 		self.assertIn(ou.STEP_SUBMIT_FAILED, steps)
+
+	def test_global_ignore_permissions_set_during_submit(self):
+		"""ERPNext's Pick List on_submit creates a nested Serial and Batch Bundle whose
+		permission check consults frappe.flags.ignore_permissions. Pin that we set it."""
+		pl = _pick_list(locations=[_location("JTD011")])
+		seen_during_submit: dict[str, bool] = {}
+
+		def capture_flag_then_succeed():
+			seen_during_submit["ignore_permissions"] = bool(frappe.flags.get("ignore_permissions"))
+
+		pl.submit.side_effect = capture_flag_then_succeed
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe, "get_all", return_value=["PICK-X"]),
+			patch.object(frappe, "get_doc", return_value=pl),
+			patch.object(ou, "log_step"),
+		):
+			ou.handle(_payload(), "corr-9b")
+		self.assertTrue(seen_during_submit["ignore_permissions"],
+			"frappe.flags.ignore_permissions must be set during the inbound submit so nested "
+			"doc creates (Serial and Batch Bundle, etc.) pass their permission checks.")
+		# Cleared after submit.
+		self.assertFalse(frappe.flags.get("ignore_permissions"))
 
 
 class TestTerminalPickList(FrappeTestCase):
