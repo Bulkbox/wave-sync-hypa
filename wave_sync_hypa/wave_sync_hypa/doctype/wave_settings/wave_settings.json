@@ -11,10 +11,10 @@
   "customer_email_fallback_enabled",
   "pick_list_inbound_submit_enabled",
   "shipping_item_tax_template",
+  "column_break_integration",
   "wave_intake_review_todo_enabled",
   "wave_intake_review_assignee",
   "wave_intake_review_role",
-  "column_break_integration",
   "price_scale_divisor",
   "log_retention_days",
   "inbound_auth_section",
@@ -28,6 +28,7 @@
   "outbound_stock_sync_enabled",
   "outbound_order_status_sync_enabled",
   "pick_list_batch_ids_push_enabled",
+  "picker_identifier_source",
   "pick_list_erp_submit_lockdown_enabled",
   "erp_defaults_section",
   "default_company",
@@ -190,6 +191,13 @@
    "fieldname": "pick_list_batch_ids_push_enabled",
    "fieldtype": "Check",
    "label": "Pick List Batch IDs Push Enabled"
+  },
+  {
+   "description": "What identifier the picker app should scan for each Pick List line. Blank (default) sends batch numbers from ERPNext's FEFO/FIFO allocation — one identifier per batch row. 'Item Code' sends the SKU itself, consolidated to one identifier per SKU. 'Item Barcode' sends the first row of the Item's Barcodes child table, also one per SKU; throws when the Item has no barcode rows. The outbound payload shape (productId + batchIds) is unchanged across modes; the inbound ORDER.UPDATE handler validates Wave's reported identifier against whatever mode is active.",
+   "fieldname": "picker_identifier_source",
+   "fieldtype": "Select",
+   "label": "Picker Identifier Source",
+   "options": "\nItem Code\nItem Barcode"
   },
   {
    "default": "0",
