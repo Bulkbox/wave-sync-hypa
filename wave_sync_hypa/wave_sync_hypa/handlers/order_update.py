@@ -24,8 +24,11 @@ field is left untouched so the original-vs-updated history is preserved.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import frappe
 
+from wave_sync_hypa.wave_sync_hypa.services import picker_identifier
 from wave_sync_hypa.wave_sync_hypa.services.dispatcher import HANDLER_REGISTRY
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 
@@ -35,8 +38,29 @@ STEP_NO_PICK_LIST = "pick_list_inbound_no_pick_list"
 STEP_DRAFT_SUBMITTED = "pick_list_inbound_pick_list_submitted"
 STEP_SUBMIT_FAILED = "pick_list_inbound_submit_failed"
 STEP_REPLACEMENT_PRESENT = "pick_list_inbound_replacement_present"
+STEP_DISPARITY_PRESENT = "pick_list_inbound_disparity_present"
 STEP_ANNOTATED_SUBMITTED = "pick_list_inbound_annotated_submitted_pl"
 STEP_ANNOTATED_CANCELLED = "pick_list_inbound_annotated_cancelled_pl"
+
+# Tolerance for float comparisons between Wave's reported picked qty and
+# ERPNext's total row qty. Wave sends integers today but the field is float
+# upstream and we want sub-unit disparities to surface, not round away.
+QTY_TOLERANCE = 0.0001
+
+
+@dataclass
+class SkuVerdict:
+	"""One SKU's reconciliation outcome: greedy allocations across rows + verdict label."""
+	allocations: list[float] = field(default_factory=list)
+	message: str | None = None
+	is_disparity: bool = False
+
+
+@dataclass
+class ReconciliationOutcome:
+	"""Aggregate verdict across every SKU in the Wave picking index."""
+	anomalies: list[str] = field(default_factory=list)
+	has_disparity: bool = False
 
 
 def handle(payload: dict, correlation_id: str) -> None:
@@ -55,7 +79,7 @@ def handle(payload: dict, correlation_id: str) -> None:
 		return
 	index = _build_wave_picking_index(payload)
 	for name in pick_list_names:
-		_process_pick_list(name, payload, correlation_id, index)
+		_process_pick_list(name, payload, correlation_id, index, settings)
 
 
 def _is_picking_complete_signal(payload: dict) -> bool:
@@ -103,7 +127,7 @@ def _build_wave_picking_index(payload: dict) -> dict[str, dict]:
 	return index
 
 
-def _process_pick_list(name: str, payload: dict, correlation_id: str, index: dict[str, dict]) -> None:
+def _process_pick_list(name: str, payload: dict, correlation_id: str, index: dict[str, dict], settings) -> None:
 	"""Branch on docstatus; submitted/cancelled get annotations only."""
 	doc = frappe.get_doc("Pick List", name)
 	if doc.docstatus == 1:
@@ -112,7 +136,7 @@ def _process_pick_list(name: str, payload: dict, correlation_id: str, index: dic
 	if doc.docstatus == 2:
 		_annotate_terminal_pick_list(doc, payload, correlation_id, index, "cancelled", STEP_ANNOTATED_CANCELLED)
 		return
-	_process_draft_pick_list(doc, payload, correlation_id, index)
+	_process_draft_pick_list(doc, payload, correlation_id, index, settings)
 
 
 def _annotate_terminal_pick_list(
@@ -134,11 +158,11 @@ def _annotate_terminal_pick_list(
 	)
 
 
-def _process_draft_pick_list(doc, payload: dict, correlation_id: str, index: dict[str, dict]) -> None:
-	"""Update + comment + submit a Draft Pick List; skip submit when any REPLACED item is present."""
-	anomalies = _apply_wave_picking_to_locations(doc, index)
+def _process_draft_pick_list(doc, payload: dict, correlation_id: str, index: dict[str, dict], settings) -> None:
+	"""Update + comment + submit a Draft Pick List; skip submit when any REPLACED item or qty/identifier disparity is present."""
+	outcome = _apply_wave_picking_to_locations(doc, index, settings)
 	_add_picker_audit_comment(doc, payload)
-	for anomaly in anomalies:
+	for anomaly in outcome.anomalies:
 		doc.add_comment("Comment", anomaly)
 	_maybe_propagate_customer_comment_to_pick_list(doc, payload)
 	_maybe_propagate_customer_comment_to_sales_order(doc, payload)
@@ -149,38 +173,143 @@ def _process_draft_pick_list(doc, payload: dict, correlation_id: str, index: dic
 		_log_replacement_present(doc, payload, correlation_id, index)
 		return
 
+	if outcome.has_disparity:
+		_save_without_submit(doc)
+		_log_disparity_present(doc, payload, correlation_id, outcome.anomalies)
+		return
+
 	_submit_pick_list_with_inbound_flag(doc, payload, correlation_id)
 
 
-def _apply_wave_picking_to_locations(doc, index: dict[str, dict]) -> list[str]:
-	"""Stamp picked_qty + batch_no on matching rows; return anomaly comment strings."""
-	anomalies: list[str] = []
-	seen_skus: set[str] = set()
+def _apply_wave_picking_to_locations(doc, index: dict[str, dict], settings) -> ReconciliationOutcome:
+	"""Allocate Wave's picked qty across batch rows per SKU; never rewrite row.batch_no.
+
+	ERPNext already assigned each row a batch_no through its FEFO/FIFO
+	allocator in set_item_locations — that is the authoritative source.
+	Wave's identifier is treated only as a verification check, not as a
+	value to write onto the rows. Per SKU:
+
+	  * group rows by item_code, preserving order (= earliest batch first);
+	  * fill row[0].picked_qty up to row[0].qty, carry remainder to row[1], ...;
+	  * compute a verdict (clean / shortfall / overpick / identifier mismatch /
+	    removed / missing) and add a Comment when the verdict isn't clean.
+
+	Any non-clean SKU flips has_disparity, which suppresses auto-submit and
+	leaves the doc in Draft for operator review.
+	"""
+	rows_by_sku: dict[str, list] = {}
 	for row in doc.locations or []:
 		sku = (row.item_code or "").strip()
+		if not sku:
+			continue
+		rows_by_sku.setdefault(sku, []).append(row)
+
+	outcome = ReconciliationOutcome()
+	for sku, rows in rows_by_sku.items():
 		wave = index.get(sku)
 		if not wave:
 			continue
-		seen_skus.add(sku)
-		if wave["status"] == "REMOVED":
-			row.picked_qty = 0
-			anomalies.append(f"Wave reported SKU {sku} as REMOVED; picked_qty set to 0.")
-			continue
-		row.picked_qty = wave["quantity"]
-		batch_ids = wave["batch_ids"]
-		if batch_ids:
-			row.batch_no = batch_ids[0]
-			if len(batch_ids) > 1:
-				anomalies.append(
-					f"Wave reported SKU {sku} from multiple batches {batch_ids}; "
-					"first batch stamped, operator review needed for the rest."
-				)
+		verdict = _reconcile_sku(rows, wave, settings)
+		for row, picked in zip(rows, verdict.allocations):
+			row.picked_qty = picked
+		if verdict.message:
+			outcome.anomalies.append(verdict.message)
+		if verdict.is_disparity:
+			outcome.has_disparity = True
+
 	for sku in index:
-		if sku not in seen_skus:
-			anomalies.append(
+		if sku not in rows_by_sku:
+			outcome.anomalies.append(
 				f"Wave reported a pick for SKU {sku} but this Pick List has no matching line."
 			)
-	return anomalies
+			outcome.has_disparity = True
+
+	return outcome
+
+
+def _reconcile_sku(rows: list, wave: dict, settings) -> SkuVerdict:
+	"""Pure: one SKU's rows + Wave entry + settings -> SkuVerdict.
+
+	Split out so it can be tested in isolation without a Pick List doc. The
+	five branches map one-to-one to the five disparity kinds plus the clean
+	case. REMOVED takes precedence over qty/identifier checks because a
+	REMOVED item is unambiguously an operator concern regardless of the
+	other dimensions.
+	"""
+	sku = (rows[0].item_code or "").strip()
+	zero_allocations = [0.0] * len(rows)
+
+	if wave["status"] == "REMOVED":
+		return SkuVerdict(
+			allocations=zero_allocations,
+			message=(
+				f"Wave reported SKU {sku} as REMOVED; picked_qty set to 0 across "
+				f"{len(rows)} batch row(s). Operator review required."
+			),
+			is_disparity=True,
+		)
+
+	wave_qty = float(wave["quantity"])
+	total_expected = sum(float(getattr(r, "qty", 0) or 0) for r in rows)
+	cap = min(wave_qty, total_expected)
+	allocations = _greedy_fill(rows, cap)
+
+	if wave_qty < total_expected - QTY_TOLERANCE:
+		return SkuVerdict(
+			allocations=allocations,
+			message=(
+				f"DISPARITY (shortfall): SKU {sku} — Wave reported picked_qty "
+				f"{wave_qty}, ERP allocated {total_expected} across {len(rows)} "
+				"batch row(s). Greedy-filled earliest first; remaining rows left "
+				"at 0. Operator review required."
+			),
+			is_disparity=True,
+		)
+
+	if wave_qty > total_expected + QTY_TOLERANCE:
+		return SkuVerdict(
+			allocations=allocations,
+			message=(
+				f"DISPARITY (overpick): SKU {sku} — Wave reported picked_qty "
+				f"{wave_qty}, ERP allocated only {total_expected} across "
+				f"{len(rows)} batch row(s). Capped allocation to ERP qty. "
+				"Operator review required."
+			),
+			is_disparity=True,
+		)
+
+	wave_id = _first_batch_identifier(wave)
+	if wave_id and not picker_identifier.identifier_matches_inbound(wave_id, rows, settings):
+		return SkuVerdict(
+			allocations=allocations,
+			message=(
+				f"DISPARITY (identifier mismatch): SKU {sku} — Wave reported "
+				f"identifier '{wave_id}' which does not match what was sent "
+				"outbound under the current Picker Identifier Source. Quantities "
+				"allocated greedily; operator review required."
+			),
+			is_disparity=True,
+		)
+
+	return SkuVerdict(allocations=allocations, message=None, is_disparity=False)
+
+
+def _greedy_fill(rows: list, total: float) -> list[float]:
+	"""Allocate `total` across rows: fill row[0].qty first, then row[1], ..."""
+	remaining = total
+	out: list[float] = []
+	for row in rows:
+		available = float(getattr(row, "qty", 0) or 0)
+		allocate = min(available, max(remaining, 0.0))
+		out.append(allocate)
+		remaining -= allocate
+	return out
+
+
+def _first_batch_identifier(wave: dict) -> str:
+	"""Return Wave's first batch identifier (or empty string when none reported)."""
+	batches = wave.get("batch_ids") or []
+	return (batches[0] or "").strip() if batches else ""
 
 
 def _has_replacements(index: dict[str, dict]) -> bool:
@@ -382,6 +511,23 @@ def _log_replacement_present(doc, payload: dict, correlation_id: str, index: dic
 		error_message=(
 			"Wave reported replacements; non-replaced lines updated + commented, "
 			"but auto-submit was suppressed. Operator review required."
+		),
+	)
+
+
+def _log_disparity_present(doc, payload: dict, correlation_id: str, anomalies: list[str]) -> None:
+	"""Warning audit row when a qty / identifier / REMOVED disparity suppresses auto-submit."""
+	log_step(
+		correlation_id, STEP_DISPARITY_PRESENT, "Warning",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		linked_doctype="Pick List",
+		linked_docname=doc.name,
+		response_body={"anomalies": anomalies},
+		error_message=(
+			"Wave-vs-ERP reconciliation surfaced disparities; lines updated + "
+			"commented, but auto-submit was suppressed. Operator review required."
 		),
 	)
 

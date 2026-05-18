@@ -18,22 +18,31 @@ from frappe.tests.utils import FrappeTestCase
 from wave_sync_hypa.wave_sync_hypa.handlers import order_update as ou
 
 
-def _settings(enabled: int = 1) -> MagicMock:
-	"""Wave Settings stand-in toggling the master switch."""
-	settings = MagicMock(name="WaveSettings")
-	settings.get.side_effect = lambda key, default=None: {
+def _settings(enabled: int = 1, picker_identifier_source: str = "") -> MagicMock:
+	"""Wave Settings stand-in: master switch + picker_identifier_source mode."""
+	values = {
 		"pick_list_inbound_submit_enabled": enabled,
-	}.get(key, default)
+		"picker_identifier_source": picker_identifier_source,
+	}
+	settings = MagicMock(name="WaveSettings")
+	settings.get.side_effect = lambda key, default=None: values.get(key, default)
 	return settings
 
 
-def _location(item_code: str, sales_order: str = "", picked_qty: float = 0, batch_no: str = "") -> SimpleNamespace:
+def _location(
+	item_code: str,
+	sales_order: str = "",
+	picked_qty: float = 0,
+	batch_no: str = "",
+	qty: float = 0,
+) -> SimpleNamespace:
 	"""Pick List location-row stand-in matching the attributes the handler touches."""
 	return SimpleNamespace(
 		item_code=item_code,
 		sales_order=sales_order,
 		picked_qty=picked_qty,
 		batch_no=batch_no,
+		qty=qty,
 	)
 
 
@@ -116,7 +125,8 @@ class TestDraftPickList(FrappeTestCase):
 	"""docstatus = 0 → update + comment + submit; replacements suppress submit."""
 
 	def test_clean_draft_updates_lines_and_submits(self):
-		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X")])
+		# ERPNext-allocated row already carries the batch_no Wave reports back.
+		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X", qty=2, batch_no="JTD01100016")])
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
 			patch.object(frappe, "get_all", return_value=["PICK-X"]),
@@ -124,8 +134,9 @@ class TestDraftPickList(FrappeTestCase):
 			patch.object(ou, "log_step") as mock_log,
 		):
 			ou.handle(_payload(), "corr-4")
-		# Line was reconciled with Wave's quantity + batch.
+		# picked_qty was greedy-filled from Wave's quantity.
 		self.assertEqual(pl.locations[0].picked_qty, 2)
+		# row.batch_no is NEVER overwritten — ERPNext's FEFO allocation is authoritative.
 		self.assertEqual(pl.locations[0].batch_no, "JTD01100016")
 		# Save + submit fired exactly once each.
 		pl.save.assert_called()
@@ -140,7 +151,7 @@ class TestDraftPickList(FrappeTestCase):
 		self.assertIn(ou.STEP_DRAFT_SUBMITTED, steps)
 
 	def test_replacement_suppresses_submit_and_logs_warning(self):
-		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X")])
+		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X", qty=2, batch_no="JTD01100016")])
 		payload = _payload()
 		payload["picking"]["items"][0]["replacements"] = [
 			{"withProductId": "wp-SUB", "quantity": 1, "pending": False},
@@ -161,8 +172,9 @@ class TestDraftPickList(FrappeTestCase):
 		self.assertIn(ou.STEP_REPLACEMENT_PRESENT, steps)
 		self.assertNotIn(ou.STEP_DRAFT_SUBMITTED, steps)
 
-	def test_removed_item_sets_picked_qty_zero(self):
-		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X")])
+	def test_removed_item_zeroes_qty_and_blocks_submit(self):
+		"""REMOVED is now a disparity — operator decides whether to amend / resubmit."""
+		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X", qty=2, batch_no="JTD01100016")])
 		payload = _payload()
 		payload["picking"]["items"][0]["status"] = "REMOVED"
 		payload["picking"]["items"][0]["quantity"] = 0
@@ -170,45 +182,58 @@ class TestDraftPickList(FrappeTestCase):
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
 			patch.object(frappe, "get_all", return_value=["PICK-X"]),
 			patch.object(frappe, "get_doc", return_value=pl),
-			patch.object(ou, "log_step"),
+			patch.object(ou, "log_step") as mock_log,
 		):
 			ou.handle(payload, "corr-6")
 		self.assertEqual(pl.locations[0].picked_qty, 0)
-		# Anomaly comment names REMOVED status.
+		pl.submit.assert_not_called()
+		pl.save.assert_called()
 		comment_bodies = [c.args[1] for c in pl.add_comment.call_args_list]
 		self.assertTrue(any("REMOVED" in b for b in comment_bodies))
+		steps = [c.args[1] for c in mock_log.call_args_list]
+		self.assertIn(ou.STEP_DISPARITY_PRESENT, steps)
+		self.assertNotIn(ou.STEP_DRAFT_SUBMITTED, steps)
 
-	def test_multi_batch_stamps_first_and_warns(self):
-		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X")])
+	def test_batch_identifier_mismatch_blocks_submit(self):
+		"""Wave reports a batch the ERP row doesn't carry — identifier mismatch, no submit."""
+		# ERP allocated batch-A; Wave reports batch-B and batch-C.
+		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X", qty=2, batch_no="BATCH-A")])
 		payload = _payload()
-		payload["products"][0]["batchIds"] = ["BATCH-A", "BATCH-B"]
+		payload["products"][0]["batchIds"] = ["BATCH-B", "BATCH-C"]
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
 			patch.object(frappe, "get_all", return_value=["PICK-X"]),
 			patch.object(frappe, "get_doc", return_value=pl),
-			patch.object(ou, "log_step"),
+			patch.object(ou, "log_step") as mock_log,
 		):
 			ou.handle(payload, "corr-7")
+		# row.batch_no is untouched; ERPNext's allocation is preserved.
 		self.assertEqual(pl.locations[0].batch_no, "BATCH-A")
+		pl.submit.assert_not_called()
+		pl.save.assert_called()
 		comment_bodies = [c.args[1] for c in pl.add_comment.call_args_list]
-		self.assertTrue(any("multiple batches" in b for b in comment_bodies))
+		self.assertTrue(any("identifier mismatch" in b for b in comment_bodies))
+		steps = [c.args[1] for c in mock_log.call_args_list]
+		self.assertIn(ou.STEP_DISPARITY_PRESENT, steps)
 
-	def test_sku_in_wave_but_not_in_pick_list_logs_anomaly(self):
-		pl = _pick_list(locations=[_location("OTHER", sales_order="SO-X")])
+	def test_sku_in_wave_but_not_in_pick_list_blocks_submit(self):
+		"""SKU present in Wave but not in ERP PL -> missing-in-ERP disparity -> no submit."""
+		pl = _pick_list(locations=[_location("OTHER", sales_order="SO-X", qty=1, batch_no="OTHER-001")])
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
 			patch.object(frappe, "get_all", return_value=["PICK-X"]),
 			patch.object(frappe, "get_doc", return_value=pl),
-			patch.object(ou, "log_step"),
+			patch.object(ou, "log_step") as mock_log,
 		):
 			ou.handle(_payload(), "corr-8")
 		comment_bodies = [c.args[1] for c in pl.add_comment.call_args_list]
-		# Wave reported JTD011 but PL only has OTHER -> anomaly + still submits.
 		self.assertTrue(any("no matching line" in b for b in comment_bodies))
-		pl.submit.assert_called_once()
+		pl.submit.assert_not_called()
+		steps = [c.args[1] for c in mock_log.call_args_list]
+		self.assertIn(ou.STEP_DISPARITY_PRESENT, steps)
 
 	def test_inbound_flag_cleared_even_when_submit_raises(self):
-		pl = _pick_list(locations=[_location("JTD011")])
+		pl = _pick_list(locations=[_location("JTD011", qty=2, batch_no="JTD01100016")])
 		pl.submit.side_effect = RuntimeError("boom")
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
@@ -228,7 +253,7 @@ class TestDraftPickList(FrappeTestCase):
 	def test_global_ignore_permissions_set_during_submit(self):
 		"""ERPNext's Pick List on_submit creates a nested Serial and Batch Bundle whose
 		permission check consults frappe.flags.ignore_permissions. Pin that we set it."""
-		pl = _pick_list(locations=[_location("JTD011")])
+		pl = _pick_list(locations=[_location("JTD011", qty=2, batch_no="JTD01100016")])
 		seen_during_submit: dict[str, bool] = {}
 
 		def capture_flag_then_succeed():
@@ -296,7 +321,7 @@ class TestCustomerCommentPropagation(FrappeTestCase):
 	"""Customer comment lands as 'Customer now asks: ...' on PL and linked SO."""
 
 	def test_propagates_to_pick_list_and_sales_order_when_present(self):
-		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-A")])
+		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-A", qty=2, batch_no="JTD01100016")])
 		so = MagicMock(name="SalesOrder")
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
@@ -314,7 +339,7 @@ class TestCustomerCommentPropagation(FrappeTestCase):
 		self.assertEqual(so_comment_bodies, ["Customer now asks: i need the order droppe"])
 
 	def test_empty_comment_adds_nothing(self):
-		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-A")])
+		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-A", qty=2, batch_no="JTD01100016")])
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
 			patch.object(frappe, "get_all", return_value=["PICK-X"]),
@@ -327,3 +352,132 @@ class TestCustomerCommentPropagation(FrappeTestCase):
 			any("Customer now asks" in b for b in comment_bodies),
 			"No customer-now-asks comment should be added for an empty Wave comment.",
 		)
+
+
+class TestReconciliationAllocator(FrappeTestCase):
+	"""Per-SKU multi-row reconciliation: greedy fill, verdicts, no batch_no rewrite."""
+
+	def _doc(self, locations: list) -> SimpleNamespace:
+		"""Doc stand-in carrying only the locations[] the allocator walks."""
+		return SimpleNamespace(locations=locations)
+
+	def _wave(self, quantity: float, batch_ids=None, status: str = "COLLECTED") -> dict:
+		"""Minimal Wave picking-index entry for one SKU."""
+		return {
+			"quantity": quantity,
+			"batch_ids": list(batch_ids or []),
+			"status": status,
+			"replacements": [],
+			"wave_product_id": "wp-X",
+		}
+
+	def test_multi_row_clean_fills_greedy_no_disparity(self):
+		# ERPNext split 5 units across two batches; Wave reports 5 picked from the first.
+		rows = [
+			_location("JTD011", qty=3, batch_no="BATCH-A"),
+			_location("JTD011", qty=2, batch_no="BATCH-B"),
+		]
+		doc = self._doc(rows)
+		index = {"JTD011": self._wave(5, batch_ids=["BATCH-A"])}
+		outcome = ou._apply_wave_picking_to_locations(doc, index, _settings())
+		self.assertEqual([r.picked_qty for r in rows], [3, 2])
+		self.assertFalse(outcome.has_disparity)
+		self.assertEqual(outcome.anomalies, [])
+		# batch_no untouched.
+		self.assertEqual([r.batch_no for r in rows], ["BATCH-A", "BATCH-B"])
+
+	def test_multi_row_shortfall_partial_fill_disparity(self):
+		# ERP allocated 5; Wave reports only 4 picked.
+		rows = [
+			_location("JTD011", qty=3, batch_no="BATCH-A"),
+			_location("JTD011", qty=2, batch_no="BATCH-B"),
+		]
+		outcome = ou._apply_wave_picking_to_locations(
+			self._doc(rows),
+			{"JTD011": self._wave(4, batch_ids=["BATCH-A"])},
+			_settings(),
+		)
+		# Greedy: first row gets 3, second gets 1, remaining stays 0.
+		self.assertEqual([r.picked_qty for r in rows], [3, 1])
+		self.assertTrue(outcome.has_disparity)
+		self.assertEqual(len(outcome.anomalies), 1)
+		self.assertIn("shortfall", outcome.anomalies[0])
+
+	def test_multi_row_overpick_caps_and_flags_disparity(self):
+		rows = [
+			_location("JTD011", qty=3, batch_no="BATCH-A"),
+			_location("JTD011", qty=2, batch_no="BATCH-B"),
+		]
+		outcome = ou._apply_wave_picking_to_locations(
+			self._doc(rows),
+			{"JTD011": self._wave(7, batch_ids=["BATCH-A"])},
+			_settings(),
+		)
+		# Capped at 5 across rows; both rows filled.
+		self.assertEqual([r.picked_qty for r in rows], [3, 2])
+		self.assertTrue(outcome.has_disparity)
+		self.assertIn("overpick", outcome.anomalies[0])
+
+	def test_batch_mode_identifier_mismatch_flags_disparity(self):
+		rows = [_location("JTD011", qty=2, batch_no="BATCH-A")]
+		outcome = ou._apply_wave_picking_to_locations(
+			self._doc(rows),
+			{"JTD011": self._wave(2, batch_ids=["BATCH-Z"])},
+			_settings(),  # blank source = batch mode
+		)
+		self.assertTrue(outcome.has_disparity)
+		self.assertIn("identifier mismatch", outcome.anomalies[0])
+
+	def test_barcode_mode_identifier_match_no_disparity(self):
+		rows = [_location("JTD011", qty=2, batch_no="BATCH-A")]
+		with patch.object(frappe, "get_all", return_value=[{"barcode": "5901234123457"}]):
+			outcome = ou._apply_wave_picking_to_locations(
+				self._doc(rows),
+				{"JTD011": self._wave(2, batch_ids=["5901234123457"])},
+				_settings(picker_identifier_source="Item Barcode"),
+			)
+		self.assertFalse(outcome.has_disparity)
+
+	def test_barcode_mode_identifier_mismatch_flags_disparity(self):
+		rows = [_location("JTD011", qty=2, batch_no="BATCH-A")]
+		with patch.object(frappe, "get_all", return_value=[{"barcode": "5901234123457"}]):
+			outcome = ou._apply_wave_picking_to_locations(
+				self._doc(rows),
+				{"JTD011": self._wave(2, batch_ids=["9999999999999"])},
+				_settings(picker_identifier_source="Item Barcode"),
+			)
+		self.assertTrue(outcome.has_disparity)
+		self.assertIn("identifier mismatch", outcome.anomalies[0])
+
+	def test_item_code_mode_match_no_disparity(self):
+		rows = [_location("JTD011", qty=2, batch_no="BATCH-A")]
+		outcome = ou._apply_wave_picking_to_locations(
+			self._doc(rows),
+			{"JTD011": self._wave(2, batch_ids=["JTD011"])},  # Wave echoes the SKU
+			_settings(picker_identifier_source="Item Code"),
+		)
+		self.assertFalse(outcome.has_disparity)
+
+	def test_removed_zeroes_qty_and_flags_disparity(self):
+		rows = [
+			_location("JTD011", qty=2, batch_no="BATCH-A"),
+			_location("JTD011", qty=1, batch_no="BATCH-B"),
+		]
+		outcome = ou._apply_wave_picking_to_locations(
+			self._doc(rows),
+			{"JTD011": self._wave(0, status="REMOVED")},
+			_settings(),
+		)
+		self.assertEqual([r.picked_qty for r in rows], [0.0, 0.0])
+		self.assertTrue(outcome.has_disparity)
+		self.assertIn("REMOVED", outcome.anomalies[0])
+
+	def test_missing_in_erp_flags_disparity(self):
+		# Wave reports a SKU the PL doesn't carry at all.
+		outcome = ou._apply_wave_picking_to_locations(
+			self._doc([_location("OTHER", qty=1, batch_no="B-1")]),
+			{"JTD011": self._wave(2, batch_ids=["BATCH-A"])},
+			_settings(),
+		)
+		self.assertTrue(outcome.has_disparity)
+		self.assertTrue(any("no matching line" in a for a in outcome.anomalies))
