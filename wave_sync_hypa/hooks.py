@@ -154,6 +154,7 @@ doc_events = {
 		"on_cancel": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_cancel",
 	},
 	"Delivery Note": {
+		"before_insert": "wave_sync_hypa.wave_sync_hypa.handlers.delivery_note.autopopulate_from_wave_so",
 		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.delivery_note.stamp_wave_order_id",
 		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.delivery_note.on_delivery_note_submit",
 	},

@@ -1,9 +1,16 @@
-"""Delivery Note hooks: stamp wave_order_id and push the status transition to Wave.
+"""Delivery Note hooks: stamp wave_order_id, autopopulate fields, push status.
 
 Wired in hooks.py:
 
-  Delivery Note.validate    -> stamp_wave_order_id
-  Delivery Note.on_submit   -> on_delivery_note_submit
+  Delivery Note.before_insert -> autopopulate_from_wave_so
+  Delivery Note.validate      -> stamp_wave_order_id
+  Delivery Note.on_submit     -> on_delivery_note_submit
+
+The autopopulate pass fires once at creation time and pulls delivery_date +
+(pickup-only) driver from the first linked Wave Sales Order. It uses
+before_insert specifically so it never re-overwrites operator edits after
+the initial save. Driver auto-stamping is opt-in via Wave Settings
+.wave_pickup_driver — leave blank to skip.
 
 The stamping pass walks `delivery_note_items[].against_sales_order` to find
 the source Sales Orders, looks up their `wave_order_id`, and persists the
@@ -37,6 +44,8 @@ from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 STEP_STAMP = "delivery_note_wave_order_id_stamped"
 STEP_STAMP_MULTI_SOURCE = "delivery_note_wave_order_id_multi_source"
 STEP_STAMP_NO_WAVE_SOURCE = "delivery_note_wave_order_id_no_wave_source"
+STEP_AUTOPOPULATED = "delivery_note_autopopulated_from_wave_so"
+STEP_AUTOPOPULATE_HETEROGENEOUS = "delivery_note_autopopulate_heterogeneous_sources"
 
 
 def stamp_wave_order_id(doc, method=None) -> None:
@@ -83,6 +92,111 @@ def on_delivery_note_submit(doc, method=None) -> None:
 	if not wave_ids and doc.get("wave_order_id"):
 		wave_ids = [doc.wave_order_id]
 	order_status.dispatch_with_wave_order_ids(doc, "submit", wave_ids)
+
+
+def autopopulate_from_wave_so(doc, method=None) -> None:
+	"""before_insert hook: pull delivery_date + (pickup) driver from the linked Wave SO.
+
+	Fires exactly once at DN creation. Five guard clauses keep the path short
+	and the mutating block obvious:
+
+	  1. No Wave-sourced linked SO -> no-op.
+	  2. Read first Wave SO; if missing -> no-op (defensive).
+	  3. Copy delivery_date (the site-managed custom field on Delivery Note).
+	  4. If wave_delivery_type != 'Pickup' -> stop here, leave driver for operator.
+	  5. If doc.driver already set OR no pickup_driver configured -> stop, respect existing state.
+	  6. Stamp doc.driver = settings.wave_pickup_driver.
+
+	When the DN draws from multiple Wave-sourced SOs with conflicting
+	delivery_date or wave_delivery_type, the first SO's values win and a
+	Warning row names the divergence for operator review.
+	"""
+	wave_order_ids = _collect_distinct_wave_order_ids(doc)
+	if not wave_order_ids:
+		return
+	primary = _read_wave_so(wave_order_ids[0])
+	if not primary:
+		return
+
+	_maybe_log_heterogeneous_wave_sources(doc, wave_order_ids, primary)
+
+	autopopulated: dict[str, str] = {}
+	if primary.get("delivery_date"):
+		doc.delivery_date = primary.get("delivery_date")
+		autopopulated["delivery_date"] = str(primary.get("delivery_date"))
+
+	delivery_type = (primary.get("wave_delivery_type") or "").strip()
+	if delivery_type == "Pickup" and not (doc.driver or ""):
+		settings = frappe.get_cached_doc("Wave Settings")
+		pickup_driver = (settings.get("wave_pickup_driver") or "").strip()
+		if pickup_driver:
+			doc.driver = pickup_driver
+			autopopulated["driver"] = pickup_driver
+
+	if autopopulated:
+		_log_autopopulated(doc, primary, autopopulated)
+
+
+def _read_wave_so(wave_order_id: str):
+	"""Return the Sales Order's delivery_date + wave_delivery_type via one DB read, or None."""
+	row = frappe.db.get_value(
+		"Sales Order",
+		{"wave_order_id": wave_order_id},
+		["name", "delivery_date", "wave_delivery_type"],
+		as_dict=True,
+	)
+	return row or None
+
+
+def _maybe_log_heterogeneous_wave_sources(doc, wave_order_ids: list[str], primary) -> None:
+	"""Warn when secondary Wave SOs disagree with the first on delivery_date / type."""
+	if len(wave_order_ids) < 2:
+		return
+	divergences: list[str] = []
+	for wave_order_id in wave_order_ids[1:]:
+		other = _read_wave_so(wave_order_id)
+		if not other:
+			continue
+		if other.get("delivery_date") != primary.get("delivery_date"):
+			divergences.append(
+				f"{wave_order_id}: delivery_date {other.get('delivery_date')} "
+				f"vs primary {primary.get('delivery_date')}"
+			)
+		if (other.get("wave_delivery_type") or "") != (primary.get("wave_delivery_type") or ""):
+			divergences.append(
+				f"{wave_order_id}: wave_delivery_type {other.get('wave_delivery_type')!r} "
+				f"vs primary {primary.get('wave_delivery_type')!r}"
+			)
+	if not divergences:
+		return
+	log_step(
+		correlation_id=new_correlation_id(),
+		step=STEP_AUTOPOPULATE_HETEROGENEOUS,
+		level="Warning",
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name or "<new>",
+		wave_id=wave_order_ids[0],
+		request_body={"wave_order_ids": wave_order_ids, "divergences": divergences},
+		error_message=(
+			"Delivery Note spans multiple Wave-sourced Sales Orders with conflicting "
+			"delivery_date or wave_delivery_type. First SO's values used; operator review."
+		),
+	)
+
+
+def _log_autopopulated(doc, primary, autopopulated: dict[str, str]) -> None:
+	"""Info audit row capturing which DN fields were stamped + which SO they came from."""
+	log_step(
+		correlation_id=new_correlation_id(),
+		step=STEP_AUTOPOPULATED,
+		level="Info",
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name or "<new>",
+		wave_id=primary.get("name"),
+		request_body={"autopopulated": autopopulated, "source_so": primary.get("name")},
+	)
 
 
 def _collect_distinct_wave_order_ids(doc) -> list[str]:
