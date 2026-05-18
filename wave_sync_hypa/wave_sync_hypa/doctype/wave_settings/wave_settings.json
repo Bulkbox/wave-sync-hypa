@@ -10,6 +10,7 @@
   "enabled",
   "customer_email_fallback_enabled",
   "pick_list_inbound_submit_enabled",
+  "shipping_item_tax_template",
   "wave_intake_review_todo_enabled",
   "wave_intake_review_assignee",
   "wave_intake_review_role",
@@ -72,6 +73,13 @@
    "fieldname": "pick_list_inbound_submit_enabled",
    "fieldtype": "Check",
    "label": "Pick List Inbound Submit Enabled"
+  },
+  {
+   "description": "Item Tax Template applied per-line to the SHIPPING_COST fee line at intake. When set, the intake handler back-calculates the line rate from Wave's shipping amount and this template's effective tax rate so the line total always equals Wave's amount (rate + tax = Wave's amount). Leave blank to use today's behaviour (rate = Wave's amount, line subject to the SO's master Sales Taxes and Charges Template).",
+   "fieldname": "shipping_item_tax_template",
+   "fieldtype": "Link",
+   "label": "Shipping Item Tax Template",
+   "options": "Item Tax Template"
   },
   {
    "default": "0",
