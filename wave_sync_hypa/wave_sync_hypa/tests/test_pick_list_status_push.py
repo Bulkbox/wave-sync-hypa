@@ -54,12 +54,14 @@ def _row(sales_order: str | None, item_code: str = "", batch_no: str = "") -> di
 	}
 
 
-def _settings(batch_ids_enabled: int = 0) -> MagicMock:
-	"""Wave Settings stand-in returning the given pick_list_batch_ids_push_enabled value."""
+def _settings(batch_ids_enabled: int = 0, picker_identifier_source: str = "") -> MagicMock:
+	"""Wave Settings stand-in: master toggle + picker_identifier_source mode."""
+	values = {
+		"pick_list_batch_ids_push_enabled": batch_ids_enabled,
+		"picker_identifier_source": picker_identifier_source,
+	}
 	settings = MagicMock(name="WaveSettings")
-	settings.get.side_effect = lambda key, default=None: (
-		batch_ids_enabled if key == "pick_list_batch_ids_push_enabled" else default
-	)
+	settings.get.side_effect = lambda key, default=None: values.get(key, default)
 	return settings
 
 
@@ -251,3 +253,76 @@ class TestAfterPickListInsert(FrappeTestCase):
 		mock_enqueue.assert_not_called()
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pl_handler.STEP_BATCH_IDS_NO_BATCHES_TO_PUSH, steps)
+
+	def test_item_code_source_enqueues_sku_consolidated_payload(self):
+		"""picker_identifier_source = 'Item Code' -> one entry per SKU with [item_code]."""
+		doc = _pl(locations=[
+			_row("SO-001", item_code="JTD011", batch_no="B-001"),
+			_row("SO-001", item_code="JTD011", batch_no="B-002"),  # 2nd batch still collapses to one SKU
+		])
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Code")),
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(order_status, "dispatch_with_wave_order_ids"),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+			patch.object(pl_handler, "log_step"),
+		):
+			pl_handler.after_pick_list_insert(doc)
+		mock_enqueue.assert_called_once()
+		self.assertEqual(
+			mock_enqueue.call_args.kwargs["products_data"],
+			[{"item_code": "JTD011", "batch_ids": ["JTD011"]}],
+		)
+
+	def test_item_barcode_source_enqueues_first_barcode_per_sku(self):
+		"""picker_identifier_source = 'Item Barcode' -> first Item Barcode row's value, one per SKU."""
+		doc = _pl(locations=[
+			_row("SO-001", item_code="JTD011", batch_no="B-001"),
+			_row("SO-001", item_code="JTD011", batch_no="B-002"),
+		])
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Barcode")),
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(frappe, "get_all", return_value=[{"barcode": "5901234123457"}]),
+			patch.object(order_status, "dispatch_with_wave_order_ids"),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+			patch.object(pl_handler, "log_step"),
+		):
+			pl_handler.after_pick_list_insert(doc)
+		mock_enqueue.assert_called_once()
+		self.assertEqual(
+			mock_enqueue.call_args.kwargs["products_data"],
+			[{"item_code": "JTD011", "batch_ids": ["5901234123457"]}],
+		)
+
+	def test_item_barcode_source_missing_barcode_logs_error_and_skips(self):
+		"""picker_identifier_source = 'Item Barcode' + Item has no barcode -> Error row, SKU dropped, others still push."""
+		doc = _pl(locations=[
+			_row("SO-001", item_code="NO-BARCODE", batch_no="B-001"),
+			_row("SO-001", item_code="JTD011", batch_no="B-002"),
+		])
+
+		def _barcode_lookup(*args, **kwargs):
+			filters = kwargs.get("filters") or {}
+			parent = filters.get("parent")
+			if parent == "JTD011":
+				return [{"barcode": "5901234123457"}]
+			return []
+
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Barcode")),
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(frappe, "get_all", side_effect=_barcode_lookup),
+			patch.object(order_status, "dispatch_with_wave_order_ids"),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+			patch.object(pl_handler, "log_step") as mock_log,
+		):
+			pl_handler.after_pick_list_insert(doc)
+		# The well-configured SKU still goes out; the broken one is dropped + logged.
+		mock_enqueue.assert_called_once()
+		self.assertEqual(
+			mock_enqueue.call_args.kwargs["products_data"],
+			[{"item_code": "JTD011", "batch_ids": ["5901234123457"]}],
+		)
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(pl_handler.STEP_BATCH_IDS_IDENTIFIER_FAILED, steps)
