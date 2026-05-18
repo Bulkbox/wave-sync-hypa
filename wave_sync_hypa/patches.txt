@@ -10,3 +10,4 @@ wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_pick_list_wave_override_role
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_default_payment_method_mappings
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_payment_validator_override_role
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_order_update_route_rule
+wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_default_shipping_cost_item

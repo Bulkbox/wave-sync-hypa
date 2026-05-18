@@ -293,6 +293,11 @@ def _append_fee_lines(sales_order, payload: dict, settings) -> list[dict]:
 	drive fulfilment, and aborting the entire order because accounting has not yet
 	added a mapping for a shipping fee would block the picker unnecessarily. Instead
 	we collect the failures and let the caller annotate the Sales Order after save.
+
+	For the SHIPPING_COST fee, when Wave Settings.shipping_item_tax_template is set,
+	the line rate is back-calculated so rate + tax == Wave's amount regardless of the
+	template's effective tax rate. Without that setting, behaviour is unchanged
+	(rate = Wave's amount; line is subject to the SO's master tax template).
 	"""
 	divisor = int(settings.price_scale_divisor or 100)
 	skipped: list[dict] = []
@@ -312,16 +317,49 @@ def _append_fee_lines(sales_order, payload: dict, settings) -> list[dict]:
 				}
 			)
 			continue
-		sales_order.append(
-			"items",
-			{
-				"item_code": item_code,
-				"qty": 1,
-				"rate": amount_major,
-				"delivery_date": sales_order.delivery_date,
-			},
-		)
+		sales_order.append("items", _build_fee_line(item_code, fee_type, amount_major, sales_order, settings))
 	return skipped
+
+
+def _build_fee_line(item_code: str, fee_type: str, amount_major: float, sales_order, settings) -> dict:
+	"""Shape an SO item dict for a Wave fee line; applies tax-aware back-calc when configured."""
+	item_tax_template = _fee_line_item_tax_template(settings, fee_type)
+	line = {
+		"item_code": item_code,
+		"qty": 1,
+		"rate": _shipping_line_rate(amount_major, item_tax_template),
+		"delivery_date": sales_order.delivery_date,
+	}
+	if item_tax_template:
+		line["item_tax_template"] = item_tax_template
+	return line
+
+
+def _fee_line_item_tax_template(settings, fee_type: str) -> str:
+	"""Return the per-line Item Tax Template to apply for this Wave fee type, or empty string."""
+	if (fee_type or "").strip() != "SHIPPING_COST":
+		return ""
+	return (settings.get("shipping_item_tax_template") or "").strip()
+
+
+def _shipping_line_rate(amount_major: float, item_tax_template: str) -> float:
+	"""Return the line rate so that rate + tax equals amount_major when the template's rate applies."""
+	if not item_tax_template:
+		return amount_major
+	effective_rate_pct = _sum_item_tax_template_rate(item_tax_template)
+	if effective_rate_pct <= 0:
+		return amount_major
+	return amount_major / (1 + effective_rate_pct / 100.0)
+
+
+def _sum_item_tax_template_rate(template_name: str) -> float:
+	"""Sum the percent tax_rate values across an Item Tax Template's child rows; 0 when missing or empty."""
+	rows = frappe.db.get_all(
+		"Item Tax Template Detail",
+		filters={"parent": template_name},
+		fields=["tax_rate"],
+	)
+	return sum(float(r.get("tax_rate") or 0) for r in rows)
 
 
 def _apply_payment_metadata(sales_order, settings, payload: dict, correlation_id: str) -> None:
