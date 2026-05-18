@@ -30,6 +30,7 @@
   "pick_list_batch_ids_push_enabled",
   "picker_identifier_source",
   "pick_list_erp_submit_lockdown_enabled",
+  "wave_pickup_driver",
   "erp_defaults_section",
   "default_company",
   "default_warehouse",
@@ -205,6 +206,13 @@
    "fieldname": "pick_list_erp_submit_lockdown_enabled",
    "fieldtype": "Check",
    "label": "Pick List ERP Submit Lockdown Enabled"
+  },
+  {
+   "description": "Driver stamped on every Delivery Note that originates from a Wave pickup order (i.e. the SO has wave_delivery_type='Pickup'). Leave blank to skip auto-stamping — operators then pick the driver manually on every DN. The auto-stamp only applies when the DN's driver field is empty at insert time; operator edits after the first save are preserved.",
+   "fieldname": "wave_pickup_driver",
+   "fieldtype": "Link",
+   "label": "Wave Pickup Driver",
+   "options": "Driver"
   },
   {
    "fieldname": "erp_defaults_section",

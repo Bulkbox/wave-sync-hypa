@@ -196,8 +196,32 @@ def _build_sales_order_header(
 			"wave_friendly_id": payload.get("friendlyId"),
 			"wave_status": payload.get("status"),
 			"wave_correlation_id": correlation_id,
+			"wave_delivery_type": _classify_delivery_type(payload),
 		}
 	)
+
+
+def _classify_delivery_type(payload: dict) -> str:
+	"""Return 'Delivery' when any SHIPPING_COST fee has a positive amount, else 'Pickup'.
+
+	Wave's ORDER.CREATE payload carries no explicit deliveryType field; we
+	infer from whether the order was charged a shipping fee. This is stamped
+	on the SO at intake (wave_delivery_type) so the Delivery Note autopopulate
+	hook can decide whether to stamp the configured Wave Pickup Driver
+	without re-parsing the original payload at DN-create time.
+
+	A delivery-promo order that zeroes shipping cost would misclassify as
+	Pickup — accepted edge case; flagged in the feature ticket.
+	"""
+	for fee in payload.get("fees") or []:
+		if (fee.get("type") or "").strip().upper() != "SHIPPING_COST":
+			continue
+		try:
+			if float(fee.get("amount") or 0) > 0:
+				return "Delivery"
+		except (TypeError, ValueError):
+			continue
+	return "Pickup"
 
 
 def _apply_tax_template(sales_order, settings) -> dict | None:
