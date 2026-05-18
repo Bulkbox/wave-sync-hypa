@@ -35,6 +35,7 @@ from __future__ import annotations
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.handlers import order_status
+from wave_sync_hypa.wave_sync_hypa.services import picker_identifier
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 
@@ -43,6 +44,7 @@ STEP_NO_WAVE_ORDERS = "pick_list_no_wave_sourced_orders"
 STEP_BATCH_IDS_ENQUEUED = "pick_list_batch_ids_push_enqueued"
 STEP_BATCH_IDS_ENQUEUE_FAILED = "pick_list_batch_ids_push_enqueue_failed"
 STEP_BATCH_IDS_NO_BATCHES_TO_PUSH = "pick_list_batch_ids_push_no_batches_to_push"
+STEP_BATCH_IDS_IDENTIFIER_FAILED = "pick_list_batch_ids_push_identifier_lookup_failed"
 STEP_SUBMIT_BLOCKED = "pick_list_submit_blocked"
 STEP_CANCEL_BLOCKED = "pick_list_cancel_blocked"
 
@@ -115,13 +117,13 @@ def after_pick_list_insert(doc, method=None) -> None:
 
 	settings = frappe.get_cached_doc("Wave Settings")
 	if settings.get("pick_list_batch_ids_push_enabled"):
-		_enqueue_batch_ids_pushes(doc, wave_ids)
+		_enqueue_batch_ids_pushes(doc, wave_ids, settings)
 
 
-def _enqueue_batch_ids_pushes(doc, wave_ids: list[str]) -> None:
-	"""For each Wave order, build per-item batch lists and enqueue one worker job."""
+def _enqueue_batch_ids_pushes(doc, wave_ids: list[str], settings) -> None:
+	"""For each Wave order, build per-item identifier lists and enqueue one worker job."""
 	correlation_id = new_correlation_id()
-	grouped = _group_batches_by_wave_order(doc, wave_ids)
+	grouped = _group_batches_by_wave_order(doc, wave_ids, settings)
 	for wave_order_id in wave_ids:
 		products_data = grouped.get(wave_order_id) or []
 		if not products_data:
@@ -172,17 +174,26 @@ def _enqueue_batch_ids_pushes(doc, wave_ids: list[str]) -> None:
 		)
 
 
-def _group_batches_by_wave_order(doc, wave_ids: list[str]) -> dict[str, list[dict]]:
+def _group_batches_by_wave_order(doc, wave_ids: list[str], settings) -> dict[str, list[dict]]:
 	"""Walk locations[] once, return {wave_order_id: [{item_code, batch_ids}, ...]} preserving row order.
 
-	Within each Wave order group, items are grouped by item_code; multiple
-	rows for the same item across different batches collapse to one entry
-	with a deduped batch_ids array. Rows without a non-empty batch_no are
-	excluded — non-batch-tracked items contribute nothing to the PATCH.
+	The `batch_ids` field is the value Wave's picker app scans for each Pick
+	List line; its meaning is governed by `Wave Settings.picker_identifier_source`:
+
+	  * blank          -> one entry per row's batch_no (today's behaviour;
+	                       preserves ERPNext FEFO/FIFO allocation).
+	  * "Item Code"    -> [item_code] (single element, consolidates the SKU's rows).
+	  * "Item Barcode" -> [Item.barcodes[0].barcode] (single element); the
+	                       picker_identifier helper raises when the Item has
+	                       no barcode row, surfacing the misconfiguration.
+
+	Items whose identifier list is empty under the active mode are excluded
+	from the payload — for batch mode that means non-batch-tracked rows
+	contribute nothing, which preserves existing behaviour.
 	"""
 	so_to_wave = _build_so_to_wave_map(doc)
 	allowed = set(wave_ids)
-	grouped: dict[str, dict[str, list[str]]] = {}
+	rows_by_order_and_item: dict[str, dict[str, list]] = {}
 	for row in doc.get("locations") or []:
 		so_name = _row_field(row, "sales_order")
 		if not so_name:
@@ -191,19 +202,36 @@ def _group_batches_by_wave_order(doc, wave_ids: list[str]) -> dict[str, list[dic
 		if not wave_order_id or wave_order_id not in allowed:
 			continue
 		item_code = _row_field(row, "item_code")
-		batch_no = _row_field(row, "batch_no")
-		if not item_code or not batch_no:
+		if not item_code:
 			continue
-		bucket = grouped.setdefault(wave_order_id, {}).setdefault(item_code, [])
-		if batch_no not in bucket:
-			bucket.append(batch_no)
-	return {
-		wave_order_id: [
-			{"item_code": item_code, "batch_ids": batches}
-			for item_code, batches in items.items()
-		]
-		for wave_order_id, items in grouped.items()
-	}
+		rows_by_order_and_item.setdefault(wave_order_id, {}).setdefault(item_code, []).append(row)
+
+	grouped: dict[str, list[dict]] = {}
+	correlation_id = new_correlation_id()
+	for wave_order_id, items in rows_by_order_and_item.items():
+		entries: list[dict] = []
+		for item_code, rows in items.items():
+			try:
+				identifiers = picker_identifier.identifiers_for_sku_outbound(rows, settings)
+			except frappe.ValidationError as exc:
+				log_step(
+					correlation_id=correlation_id,
+					step=STEP_BATCH_IDS_IDENTIFIER_FAILED,
+					level="Error",
+					doc_type=doc.doctype,
+					linked_doctype=doc.doctype,
+					linked_docname=doc.name,
+					wave_id=wave_order_id,
+					request_body={"item_code": item_code},
+					error_message=str(exc),
+				)
+				continue
+			if not identifiers:
+				continue
+			entries.append({"item_code": item_code, "batch_ids": identifiers})
+		if entries:
+			grouped[wave_order_id] = entries
+	return grouped
 
 
 def _build_so_to_wave_map(doc) -> dict[str, str]:

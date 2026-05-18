@@ -38,6 +38,13 @@ def _pl_doc(locations: list[dict] | None = None, wave_order_id: str = "") -> Mag
 	return doc
 
 
+def _settings_stub() -> MagicMock:
+	"""Wave Settings stand-in returning blank picker_identifier_source (today's batch mode)."""
+	settings = MagicMock(name="WaveSettings")
+	settings.get.side_effect = lambda key, default=None: default
+	return settings
+
+
 class TestPushBatchIdsNow(FrappeTestCase):
 	"""Manual-trigger endpoint: enqueue per Wave order, bypass kill-switch."""
 
@@ -61,6 +68,7 @@ class TestPushBatchIdsNow(FrappeTestCase):
 		doc = _pl_doc(locations=[_row("SO-001", item_code="JTD011", batch_no="")])
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),
+			patch.object(frappe, "get_cached_doc", return_value=_settings_stub()),
 			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
 			patch.object(frappe, "enqueue") as mock_enqueue,
 			patch.object(pl_api, "log_step") as mock_log,
@@ -84,6 +92,7 @@ class TestPushBatchIdsNow(FrappeTestCase):
 
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),
+			patch.object(frappe, "get_cached_doc", return_value=_settings_stub()),
 			patch.object(frappe.db, "get_value", side_effect=_by_so),
 			patch.object(frappe, "enqueue") as mock_enqueue,
 			patch.object(pl_api, "log_step"),
@@ -105,6 +114,7 @@ class TestPushBatchIdsNow(FrappeTestCase):
 		doc = _pl_doc(locations=[_row("SO-001", item_code="JTD011", batch_no="B-001")])
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),
+			patch.object(frappe, "get_cached_doc", return_value=_settings_stub()),
 			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
 			patch.object(frappe, "enqueue"),
 			patch.object(pl_api, "log_step"),

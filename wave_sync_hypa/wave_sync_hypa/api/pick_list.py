@@ -47,7 +47,8 @@ def push_batch_ids_now(pick_list: str) -> dict:
 		)
 		return {"ok": False, "reason": _("Pick List has no Wave-sourced Sales Orders.")}
 
-	grouped = pl_handler._group_batches_by_wave_order(doc, wave_ids)
+	settings = frappe.get_cached_doc("Wave Settings")
+	grouped = pl_handler._group_batches_by_wave_order(doc, wave_ids, settings)
 
 	enqueued = 0
 	skipped_no_batches: list[str] = []
