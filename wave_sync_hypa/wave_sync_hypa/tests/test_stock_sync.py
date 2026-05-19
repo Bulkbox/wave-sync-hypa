@@ -32,11 +32,17 @@ DUMMY_DEFAULT_WAREHOUSE = "Stores - WAVE"
 DUMMY_OTHER_WAREHOUSE = "WIP - WAVE"
 
 
-def _stub_settings(*, enabled: bool = True, default_warehouse: str = DUMMY_DEFAULT_WAREHOUSE) -> MagicMock:
+def _stub_settings(
+	*,
+	enabled: bool = True,
+	default_warehouse: str = DUMMY_DEFAULT_WAREHOUSE,
+	caps_max_quantity: bool = False,
+) -> MagicMock:
 	"""Return a MagicMock that mimics Wave Settings .get / .get_password."""
 	settings = MagicMock(name="WaveSettings")
 	values = {
 		"outbound_stock_sync_enabled": 1 if enabled else 0,
+		"outbound_stock_caps_max_quantity_enabled": 1 if caps_max_quantity else 0,
 		"default_warehouse": default_warehouse,
 		"wave_api_base_url": DUMMY_BASE_URL,
 		"wave_app_id": DUMMY_APP_ID,
@@ -371,6 +377,116 @@ class TestStockPusherWorker(FrappeTestCase):
 		mock_post.assert_not_called()
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(stock_pusher.STEP_PUSH_ABORTED_MISSING_CONFIG, steps)
+
+	def test_caps_off_does_not_patch_product(self):
+		"""Cap setting off (today's behaviour): stock POST fires, product PATCH does not."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings(caps_max_quantity=False)),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value()),
+			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={"ok": True}) as mock_post,
+			patch.object(stock_pusher.wave_client, "patch_product") as mock_patch,
+			patch.object(stock_pusher, "log_step"),
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-caps-off")
+		mock_post.assert_called_once()
+		mock_patch.assert_not_called()
+
+	def test_caps_on_mirrors_quantity_to_product(self):
+		"""Cap setting on + stock POST succeeds -> PATCH body = {'quantityLimit': <same qty>}."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings(caps_max_quantity=True)),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(qty=42.0)),
+			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={"ok": True}),
+			patch.object(stock_pusher.wave_client, "patch_product", return_value={"ok": True}) as mock_patch,
+			patch.object(stock_pusher, "log_step") as mock_log,
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-caps-on")
+		mock_patch.assert_called_once_with(
+			base_url=DUMMY_BASE_URL,
+			api_key=DUMMY_API_KEY,
+			app_id=DUMMY_APP_ID,
+			product_id=DUMMY_WAVE_PRODUCT_ID,
+			body={"quantityLimit": 42},
+		)
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(stock_pusher.STEP_QUANTITY_LIMIT_ATTEMPT, steps)
+		self.assertIn(stock_pusher.STEP_QUANTITY_LIMIT_PUSHED, steps)
+
+	def test_caps_on_skips_patch_when_stock_push_fails(self):
+		"""Stock POST failure short-circuits — PATCH never fires."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings(caps_max_quantity=True)),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(qty=42.0)),
+			patch.object(
+				stock_pusher.wave_client,
+				"post_stock_sync",
+				side_effect=WaveOutboundError("HTTP 500: boom", http_status=500),
+			),
+			patch.object(stock_pusher.wave_client, "patch_product") as mock_patch,
+			patch.object(stock_pusher, "log_step"),
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-caps-stock-fail")
+		mock_patch.assert_not_called()
+
+	def test_caps_on_patch_failure_logs_warning_does_not_raise(self):
+		"""Stock POST succeeded -> partial success. PATCH failure logs Warning, no exception."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings(caps_max_quantity=True)),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(qty=42.0)),
+			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={"ok": True}),
+			patch.object(
+				stock_pusher.wave_client,
+				"patch_product",
+				side_effect=WaveOutboundError("HTTP 422: invalid", http_status=422),
+			),
+			patch.object(stock_pusher, "log_step") as mock_log,
+		):
+			# Must not raise.
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-caps-patch-fail")
+		failure_calls = [c for c in mock_log.call_args_list if c.kwargs.get("step") == stock_pusher.STEP_QUANTITY_LIMIT_FAILED]
+		self.assertEqual(len(failure_calls), 1)
+		self.assertEqual(failure_calls[0].kwargs.get("level"), "Warning")
+		# Stock push success row still logged — partial success.
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(stock_pusher.STEP_PUSH_SUCCESS, steps)
+		self.assertNotIn(stock_pusher.STEP_QUANTITY_LIMIT_PUSHED, steps)
+
+	def test_caps_on_with_zero_quantity_sends_zero(self):
+		"""Stock = 0 -> quantityLimit = 0 (mirror exactly; Wave caps order to 0)."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings(caps_max_quantity=True)),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value(qty=0.0)),
+			patch.object(stock_pusher.wave_client, "post_stock_sync", return_value={"ok": True}),
+			patch.object(stock_pusher.wave_client, "patch_product", return_value={"ok": True}) as mock_patch,
+			patch.object(stock_pusher, "log_step"),
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-caps-zero")
+		self.assertEqual(mock_patch.call_args.kwargs["body"], {"quantityLimit": 0})
+
+	def test_caps_on_after_product0006_retry_uses_fresh_id(self):
+		"""PRODUCT0006 -> re-resolve -> retry stock POST -> on retry success, PATCH uses fresh id."""
+		fresh_id = "fresh-wave-id"
+		first_error = WaveOutboundError(
+			"Wave stock/sync returned HTTP 422: ...",
+			http_status=422,
+			wave_code="PRODUCT0006",
+		)
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings(caps_max_quantity=True)),
+			patch.object(frappe.db, "get_value", side_effect=_mock_db_get_value()),
+			patch.object(stock_pusher.product_resolver, "resolve_wave_product_id", return_value=fresh_id),
+			patch.object(
+				stock_pusher.wave_client,
+				"post_stock_sync",
+				side_effect=[first_error, {"ok": True}],
+			),
+			patch.object(stock_pusher.wave_client, "patch_product", return_value={"ok": True}) as mock_patch,
+			patch.object(stock_pusher, "log_step"),
+		):
+			stock_pusher.push_item_stock(DUMMY_ITEM, "corr-caps-retry")
+		# Exactly one PATCH call, with the refreshed wave_product_id.
+		mock_patch.assert_called_once()
+		self.assertEqual(mock_patch.call_args.kwargs["product_id"], fresh_id)
 
 
 class TestWaveClient(FrappeTestCase):
