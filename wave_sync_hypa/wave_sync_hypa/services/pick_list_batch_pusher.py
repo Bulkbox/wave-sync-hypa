@@ -189,7 +189,11 @@ def _build_products_payload(
 				),
 			)
 			continue
-		out.append({"productId": wave_product_id, "batchIds": batches})
+		product_entry: dict = {"productId": wave_product_id, "batchIds": batches}
+		comments = (entry.get("comments") or "").strip()
+		if comments:
+			product_entry["comments"] = comments
+		out.append(product_entry)
 	return out
 
 

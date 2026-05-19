@@ -186,6 +186,41 @@ class TestPushPickListBatchIds(FrappeTestCase):
 		body = mock_patch.call_args.kwargs["body"]
 		self.assertEqual(body[0]["batchIds"], ["B-001", "B-002", "B-003"])
 
+	def test_forwards_comments_to_patch_body_when_present(self):
+		"""products_data entry with 'comments' -> the string lands on the final PATCH body entry."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe.db, "get_value", return_value="wave-prod-jtd011"),
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products", return_value={}) as mock_patch,
+			patch.object(pick_list_batch_pusher, "log_step"),
+		):
+			_call([{
+				"item_code": "JTD011",
+				"batch_ids": ["B-001", "B-002"],
+				"comments": "- B-001: 3\n- B-002: 2",
+			}])
+		body = mock_patch.call_args.kwargs["body"]
+		self.assertEqual(
+			body,
+			[{
+				"productId": "wave-prod-jtd011",
+				"batchIds": ["B-001", "B-002"],
+				"comments": "- B-001: 3\n- B-002: 2",
+			}],
+		)
+
+	def test_omits_comments_when_blank_or_missing(self):
+		"""Empty / missing comments field does not appear in the PATCH body — keeps body minimal."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe.db, "get_value", return_value="wave-prod-jtd011"),
+			patch.object(pick_list_batch_pusher.wave_client, "patch_order_products", return_value={}) as mock_patch,
+			patch.object(pick_list_batch_pusher, "log_step"),
+		):
+			_call([{"item_code": "JTD011", "batch_ids": ["B-001"], "comments": "   "}])
+		body = mock_patch.call_args.kwargs["body"]
+		self.assertNotIn("comments", body[0])
+
 	def test_logs_failed_on_outbound_error_and_swallows(self):
 		"""WaveOutboundError -> Failed Error row, no exception raised out of worker."""
 		with (

@@ -228,7 +228,11 @@ def _group_batches_by_wave_order(doc, wave_ids: list[str], settings) -> dict[str
 				continue
 			if not identifiers:
 				continue
-			entries.append({"item_code": item_code, "batch_ids": identifiers})
+			entries.append({
+				"item_code": item_code,
+				"batch_ids": identifiers,
+				"comments": picker_identifier.comment_for_sku_outbound(rows),
+			})
 		if entries:
 			grouped[wave_order_id] = entries
 	return grouped
