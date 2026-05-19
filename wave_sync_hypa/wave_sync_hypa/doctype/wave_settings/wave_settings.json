@@ -65,20 +65,20 @@
   },
   {
    "default": "0",
-   "description": "When on, customer resolution falls back to matching by email after the primary wave_customer_id lookup misses. Lets the integration adopt existing ERP customers (imported, manually entered, or re-registered under a new Wave _id) instead of creating duplicates. Strict: declines on ambiguous matches (multiple ERP customers share the email, or the single match is already linked to a different Wave id) and logs to the Frappe Error Log. Default off so existing sites keep the wave_id-only behaviour until ops opts in.",
+   "description": "When on, the intake matches Wave customers to existing ERP customers by email when the Wave ID lookup misses — preventing duplicates for customers added manually or imported. Skips ambiguous matches (same email on multiple ERP customers, or an email already linked to a different Wave ID) and logs a warning. Default off.",
    "fieldname": "customer_email_fallback_enabled",
    "fieldtype": "Check",
    "label": "Customer Email Fallback Lookup Enabled"
   },
   {
    "default": "0",
-   "description": "When on, ORDER.UPDATE webhooks with pickerStatus=COLLECTED reconcile the ERP Pick List (set picked_qty + batch_no from Wave's payload) and auto-submit any Pick List in Draft state. Submitted/cancelled Pick Lists are annotated with Wave's reported pick state via Frappe Comments only; their docstatus is never touched. Submit happens through the existing Pick List Wave Override permission gate via the inbound flag. Default off so existing sites are no-ops until ops opts in.",
+   "description": "When on, Wave's COLLECTED webhook reconciles the matching Pick List and auto-submits it if still in Draft. Already-submitted or cancelled Pick Lists only get a Comment summarising Wave's reported pick — never modified. Default off.",
    "fieldname": "pick_list_inbound_submit_enabled",
    "fieldtype": "Check",
    "label": "Pick List Inbound Submit Enabled"
   },
   {
-   "description": "Item Tax Template applied per-line to the SHIPPING_COST fee line at intake. When set, the intake handler back-calculates the line rate from Wave's shipping amount and this template's effective tax rate so the line total always equals Wave's amount (rate + tax = Wave's amount). Leave blank to use today's behaviour (rate = Wave's amount, line subject to the SO's master Sales Taxes and Charges Template).",
+   "description": "Tax template applied to the shipping fee line at intake. When set, the line rate is back-calculated so rate + tax equals Wave's reported shipping amount exactly. Leave blank to use Wave's amount as the rate directly and let the SO's master tax template apply on top.",
    "fieldname": "shipping_item_tax_template",
    "fieldtype": "Link",
    "label": "Shipping Item Tax Template",
@@ -86,7 +86,7 @@
   },
   {
    "default": "0",
-   "description": "When on, an SO drafted with wave_manual_review_required=1 (unresolved items, missing fee mappings, missing tax templates) also creates a Frappe ToDo so the team is pinged in 'My Tasks' without needing Wave Sync Log access. Recipient resolved from Assignee first, then Role. Default off.",
+   "description": "When on, SOs flagged for manual review also create a Frappe ToDo so the team is pinged in 'My Tasks'. Recipient is the Assignee field below, falling back to all users in the Role. Default off.",
    "fieldname": "wave_intake_review_todo_enabled",
    "fieldtype": "Check",
    "label": "Intake Review ToDo Enabled"
@@ -133,7 +133,7 @@
    "label": "Inbound Authentication"
   },
   {
-   "description": "Shared secret. Wave must send this value in the x-api-key HTTP header on every webhook. Must be exactly 32 URL-safe characters (A-Z, a-z, 0-9, underscore, or hyphen only) — generate with `python -c 'import secrets; print(secrets.token_urlsafe(24))'`. Non-URL-safe characters (e.g. £, $, &, ', <, >, /, %) are rejected because they break in HTTP headers, shells, or proxies. Stored encrypted.",
+   "description": "Shared secret sent by Wave in the x-api-key header on every webhook. Must be exactly 32 URL-safe characters (A-Z, a-z, 0-9, underscore, hyphen). Stored encrypted.",
    "fieldname": "inbound_api_key",
    "fieldtype": "Password",
    "label": "Inbound API Key (32 URL-safe chars)"
@@ -158,7 +158,7 @@
   },
   {
    "default": "1",
-   "description": "Identifier of the Wave store this ERP instance mirrors. Single-shop deployments leave this as 1; sent in the JSON body of stock-sync calls.",
+   "description": "Identifier of the Wave store this ERP instance mirrors. Single-shop deployments leave this as 1.",
    "fieldname": "wave_store_id",
    "fieldtype": "Data",
    "label": "Wave Store ID"
@@ -196,13 +196,13 @@
   },
   {
    "default": "0",
-   "description": "When on, every Pick List creation triggers a push of the picked items + batch numbers to Wave. Independent of the Pick List ACCEPTED status push (which is gated by the Outbound Status Rules table — add/remove the (Pick List, after_insert) row to control that channel). Off by default; flip on once Wave's batch-IDs endpoint payload is wired in services/wave_client.",
+   "description": "When on, every Pick List creation pushes its items + identifiers (batch numbers, SKU, or barcode — per Picker Identifier Source below) to Wave's picker app. Independent of the ACCEPTED status push, which is gated by Outbound Status Rules. Default off.",
    "fieldname": "pick_list_batch_ids_push_enabled",
    "fieldtype": "Check",
    "label": "Pick List Batch IDs Push Enabled"
   },
   {
-   "description": "What identifier the picker app should scan for each Pick List line. Blank (default) sends batch numbers from ERPNext's FEFO/FIFO allocation — one identifier per batch row. 'Item Code' sends the SKU itself, consolidated to one identifier per SKU. 'Item Barcode' sends the first row of the Item's Barcodes child table, also one per SKU; throws when the Item has no barcode rows. The outbound payload shape (productId + batchIds) is unchanged across modes; the inbound ORDER.UPDATE handler validates Wave's reported identifier against whatever mode is active.",
+   "description": "What identifier the picker app scans per Pick List line. Blank sends ERPNext batch numbers (one per allocated batch row); 'Item Code' sends the SKU; 'Item Barcode' sends the Item's first Barcode row. Inbound reconciliation expects Wave to echo back the same identifier — mismatches block auto-submit for operator review.",
    "fieldname": "picker_identifier_source",
    "fieldtype": "Select",
    "label": "Picker Identifier Source",
@@ -210,13 +210,13 @@
   },
   {
    "default": "0",
-   "description": "When on, ERP-side Pick List submit and cancel are restricted to users with the 'Pick List Wave Override' role (System Manager always passes). Use this once Wave is the source of truth for picking — direct ERP submissions then become a manager-only escape hatch. Default off so existing sites keep working until ops decides to enforce.",
+   "description": "When on, ERP-side Pick List submit and cancel require the 'Pick List Wave Override' role (System Manager always passes). Use this once Wave's picker app is the source of truth — direct ERP submissions become a manager-only escape hatch. Default off.",
    "fieldname": "pick_list_erp_submit_lockdown_enabled",
    "fieldtype": "Check",
    "label": "Pick List ERP Submit Lockdown Enabled"
   },
   {
-   "description": "Driver stamped on every Delivery Note that originates from a Wave pickup order (i.e. the SO has wave_delivery_type='Pickup'). Leave blank to skip auto-stamping — operators then pick the driver manually on every DN. The auto-stamp only applies when the DN's driver field is empty at insert time; operator edits after the first save are preserved.",
+   "description": "Driver auto-stamped on Delivery Notes whose linked Wave SO is a Pickup order. Leave blank to skip — operators then pick the driver manually. The auto-stamp only applies on DN creation when the driver field is empty; later operator edits are never overwritten.",
    "fieldname": "wave_pickup_driver",
    "fieldtype": "Link",
    "label": "Wave Pickup Driver",
@@ -256,7 +256,7 @@
    "options": "Currency"
   },
   {
-   "description": "Placeholder Item used as the single fallback line when an ORDER.CREATE webhook arrives but ZERO of its Wave SKUs resolve to ERP Items. Without this set, such orders are aborted with a loud Error + ToDo. Recommended setup: create an Item named e.g. 'Wave Unresolved SKU Placeholder' with a parking income account; the SO it lands on will be flagged for manual review and re-keyed by the operator.",
+   "description": "Placeholder Item used as the fallback line when none of an order's Wave SKUs resolve to ERP Items. Leave blank to abort such orders with a loud Error + ToDo instead. When set, the SO is flagged for manual review so operators re-key the real items.",
    "fieldname": "default_unresolved_items_placeholder",
    "fieldtype": "Link",
    "label": "Default Unresolved Items Placeholder",
@@ -322,14 +322,14 @@
    "options": "Wave Fee Mapping"
   },
   {
-   "description": "Sales Taxes and Charges Templates stamped on every draft Sales Order created from ORDER.CREATE webhooks. The first enabled row whose template exists and is not disabled wins; ERPNext copies the template's tax rows into the Sales Order automatically.",
+   "description": "Sales Taxes and Charges Templates applied to Sales Orders created from Wave webhooks. The first enabled, existing, non-disabled row wins.",
    "fieldname": "tax_rules",
    "fieldtype": "Table",
    "label": "Tax Rules",
    "options": "Wave Tax Rule"
   },
   {
-   "description": "Maps Wave's paymentType strings to a classification (prepaid|cod) and an ERP Mode of Payment. Read at order intake to stamp wave_payment_classification on the Sales Order, and at Payment Entry submit to validate that the right MOP is being used for the order's payment class.",
+   "description": "Maps each Wave paymentType to a prepaid/cod classification and an ERP Mode of Payment. The intake stamps the classification on the Sales Order; the Payment Entry validator uses it to confirm submitted PEs match Wave's expected payment class.",
    "fieldname": "payment_method_mappings",
    "fieldtype": "Table",
    "label": "Payment Method Mappings",
