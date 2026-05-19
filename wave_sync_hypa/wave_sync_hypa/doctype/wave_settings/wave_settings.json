@@ -26,6 +26,7 @@
   "column_break_outbound",
   "wave_api_key",
   "outbound_stock_sync_enabled",
+  "outbound_stock_caps_max_quantity_enabled",
   "outbound_order_status_sync_enabled",
   "pick_list_batch_ids_push_enabled",
   "picker_identifier_source",
@@ -178,6 +179,13 @@
    "fieldname": "outbound_stock_sync_enabled",
    "fieldtype": "Check",
    "label": "Outbound Stock Sync Enabled"
+  },
+  {
+   "default": "0",
+   "description": "When on, every stock-sync push is followed by a PATCH that writes quantityLimit = same quantity, capping how much customers can order to what's actually in stock. Fires only after stock_sync_enabled succeeds; a failure here logs a Warning but never reverts the stock push. Default off.",
+   "fieldname": "outbound_stock_caps_max_quantity_enabled",
+   "fieldtype": "Check",
+   "label": "Outbound Stock Caps Max Quantity Enabled"
   },
   {
    "default": "1",

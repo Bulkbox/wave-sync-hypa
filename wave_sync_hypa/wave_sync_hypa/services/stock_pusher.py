@@ -41,6 +41,9 @@ STEP_PUSH_ABORTED_NO_WAREHOUSE = "stock_sync_push_aborted_no_default_warehouse"
 STEP_PUSH_ABORTED_MISSING_CONFIG = "stock_sync_push_aborted_missing_config"
 STEP_PUSH_ABORTED_UNMAPPED = "stock_sync_push_aborted_product_unmapped"
 STEP_PUSH_UNEXPECTED_ERROR = "stock_sync_push_unexpected_error"
+STEP_QUANTITY_LIMIT_ATTEMPT = "stock_quantity_limit_push_attempt"
+STEP_QUANTITY_LIMIT_PUSHED = "stock_quantity_limit_push_success"
+STEP_QUANTITY_LIMIT_FAILED = "stock_quantity_limit_push_failed"
 
 # Wave's app-level error code for "product with the given _id not found".
 # Treated as a signal to refresh our cached wave_product_id and retry once.
@@ -134,8 +137,9 @@ def _push_item_stock_inner(item_code: str, correlation_id: str, batch_id: str | 
 	# matching the {id} path param — sending item_code here would diverge
 	# from the live request and confuse operators reading the audit trail.
 	body = {"productId": wave_product_id, "storeId": config["store_id"], "quantity": quantity}
+	caps_max_quantity = bool(settings.get("outbound_stock_caps_max_quantity_enabled"))
 
-	if not _attempt_push(item_code, wave_product_id, config, body, correlation_id, batch_id):
+	if not _attempt_push(item_code, wave_product_id, config, body, correlation_id, batch_id, caps_max_quantity):
 		# First push failed with PRODUCT0006: refresh cached id and retry once.
 		# We DO NOT trust the previously cached id at this point — _attempt_push
 		# only returns False when the cached id was definitively rejected by Wave.
@@ -157,7 +161,7 @@ def _push_item_stock_inner(item_code: str, correlation_id: str, batch_id: str | 
 			request_body={"previous_wave_id": wave_product_id, "new_wave_id": fresh_id},
 			error_message="cached Wave product id was stale; retrying push with refreshed id.",
 		)
-		_attempt_push(item_code, fresh_id, config, body, correlation_id, batch_id)
+		_attempt_push(item_code, fresh_id, config, body, correlation_id, batch_id, caps_max_quantity)
 
 
 def _attempt_push(
@@ -167,6 +171,7 @@ def _attempt_push(
 	body: dict,
 	correlation_id: str,
 	batch_id: str | None,
+	caps_max_quantity: bool,
 ) -> bool:
 	"""Issue one POST to Wave's stock/sync endpoint; return False ONLY for PRODUCT0006.
 
@@ -175,6 +180,12 @@ def _attempt_push(
 	that branch is PRODUCT0006. Every other failure (auth, network, 5xx,
 	unrelated 4xx) is logged here and consumed; the caller does not retry
 	on those because retrying would not change the outcome.
+
+	When caps_max_quantity is True and the stock POST succeeds, this function
+	also mirrors quantityLimit on the product via a follow-up PATCH. That
+	second call is best-effort — its failure logs a Warning but is otherwise
+	swallowed so a transient PATCH failure never reverts an already-good
+	stock state.
 	"""
 	log_step(
 		correlation_id=correlation_id,
@@ -224,7 +235,66 @@ def _attempt_push(
 		request_body=body,
 		response_body=response,
 	)
+	if caps_max_quantity:
+		_push_quantity_limit(item_code, wave_product_id, config, body["quantity"], correlation_id, batch_id)
 	return True
+
+
+def _push_quantity_limit(
+	item_code: str,
+	wave_product_id: str,
+	config: dict,
+	quantity: int,
+	correlation_id: str,
+	batch_id: str | None,
+) -> None:
+	"""PATCH quantityLimit to match the pushed quantity; failures log Warning but do NOT raise."""
+	body = {"quantityLimit": quantity}
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_QUANTITY_LIMIT_ATTEMPT,
+		level="Info",
+		doc_type="Item",
+		linked_doctype="Item",
+		linked_docname=item_code,
+		wave_id=wave_product_id,
+		friendly_id=batch_id,
+		request_body=body,
+	)
+	try:
+		wave_client.patch_product(
+			base_url=config["base_url"],
+			api_key=config["api_key"],
+			app_id=config["app_id"],
+			product_id=wave_product_id,
+			body=body,
+		)
+	except WaveOutboundError as exc:
+		log_step(
+			correlation_id=correlation_id,
+			step=STEP_QUANTITY_LIMIT_FAILED,
+			level="Warning",
+			doc_type="Item",
+			linked_doctype="Item",
+			linked_docname=item_code,
+			wave_id=wave_product_id,
+			friendly_id=batch_id,
+			request_body=body,
+			error_message=str(exc),
+			stack_trace=frappe.get_traceback(),
+		)
+		return
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_QUANTITY_LIMIT_PUSHED,
+		level="Success",
+		doc_type="Item",
+		linked_doctype="Item",
+		linked_docname=item_code,
+		wave_id=wave_product_id,
+		friendly_id=batch_id,
+		request_body=body,
+	)
 
 
 def _get_or_resolve_wave_product_id(item_code: str, settings, correlation_id: str) -> str | None:
