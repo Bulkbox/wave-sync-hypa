@@ -247,6 +247,48 @@ def get_product_by_sku(
 	return body
 
 
+def patch_product(
+	*,
+	base_url: str,
+	api_key: str,
+	app_id: str,
+	product_id: str,
+	body: dict,
+	timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+	"""PATCH /api/v3/admin/products/{id} with a partial body; return the parsed response.
+
+	Wave's PATCH endpoint accepts any subset of the product fields and leaves
+	the rest unchanged. The caller is responsible for the body's shape — this
+	wrapper is intentionally generic so future partial-update needs (price,
+	availability, quantityLimit, etc.) reuse one HTTP path.
+	"""
+	if not base_url:
+		raise WaveOutboundError("Wave API base URL is not configured.")
+	if not api_key:
+		raise WaveOutboundError("Wave API key is not configured.")
+	if not app_id:
+		raise WaveOutboundError("Wave App ID is not configured.")
+	if not product_id:
+		raise WaveOutboundError("product_id is required.")
+
+	url = _build_admin_product_url(base_url, product_id)
+	headers = _build_headers(api_key, app_id)
+
+	try:
+		response = requests.patch(url, json=body, headers=headers, timeout=timeout)
+	except requests.RequestException as exc:
+		raise WaveOutboundError(f"network error calling Wave product PATCH: {exc}") from exc
+
+	_raise_for_response(response, "admin/products PATCH")
+	return _parse_json(response)
+
+
+def _build_admin_product_url(base_url: str, product_id: str) -> str:
+	"""Compose the admin product detail URL used by PATCH / GET /admin/products/{id}."""
+	return f"{base_url.rstrip('/')}/api/v3/admin/products/{product_id}"
+
+
 def _build_stock_sync_url(base_url: str, product_id: str) -> str:
 	"""Compose the per-product stock-sync URL, normalising trailing slashes on the base."""
 	return f"{base_url.rstrip('/')}/api/v3/admin/products/{product_id}/stock/sync"
