@@ -210,7 +210,7 @@
   },
   {
    "default": "0",
-   "description": "When on, ERP-side Pick List submit and cancel are restricted to users with the 'Pick List Wave Override' role (System Manager always passes). Use this once Wave is the source of truth for picking — direct ERP submissions then become a manager-only escape hatch. Default off so existing sites keep working until ops decides to enforce.",
+   "description": "When on, Wave-sourced Pick Lists require the 'Pick List Wave Override' role for ERP-side submit and cancel (System Manager always passes; Wave's inbound webhook bypasses via its own flag). Offline Pick Lists (no wave_order_id) are unaffected and submit normally. Default off.",
    "fieldname": "pick_list_erp_submit_lockdown_enabled",
    "fieldtype": "Check",
    "label": "Pick List ERP Submit Lockdown Enabled"

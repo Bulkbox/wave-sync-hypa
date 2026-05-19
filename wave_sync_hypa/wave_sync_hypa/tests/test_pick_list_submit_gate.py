@@ -192,3 +192,26 @@ class TestPickListSubmitGate(FrappeTestCase):
 		err = call.kwargs.get("error_message") or ""
 		self.assertIn(WAREHOUSE_USER, err)
 		self.assertIn(pl_handler.PICK_LIST_OVERRIDE_ROLE, err)
+
+	def test_lockdown_on_lets_non_wave_pick_list_submit(self):
+		"""Offline Pick List (no wave_order_id) -> lockdown doesn't apply, even for unprivileged users."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe, "session", MagicMock(user=WAREHOUSE_USER)),
+			patch.object(frappe, "get_roles", return_value=["Stock User"]),
+			patch.object(pl_handler, "log_step") as mock_log,
+		):
+			# Must not raise.
+			pl_handler.block_unprivileged_pick_list_submit(_doc(wave_order_id=""))
+		mock_log.assert_not_called()
+
+	def test_lockdown_on_lets_non_wave_pick_list_cancel(self):
+		"""Same bypass applies to cancel — offline PLs cancel normally regardless of lockdown."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe, "session", MagicMock(user=WAREHOUSE_USER)),
+			patch.object(frappe, "get_roles", return_value=["Stock User"]),
+			patch.object(pl_handler, "log_step") as mock_log,
+		):
+			pl_handler.block_unprivileged_pick_list_cancel(_doc(wave_order_id=""))
+		mock_log.assert_not_called()
