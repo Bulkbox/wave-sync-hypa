@@ -293,12 +293,22 @@ def block_unprivileged_pick_list_cancel(doc, method=None) -> None:
 
 
 def _enforce_pick_list_action_gate(doc, *, action: str, step: str) -> None:
-	"""Common gate: pass when lockdown off / inbound flag set / user privileged."""
+	"""Common gate: pass when lockdown off / inbound flag set / non-Wave PL / user privileged.
+
+	The lockdown's purpose is to make Wave's picker app the source of truth for
+	Wave-sourced Pick Lists. PLs with no wave_order_id stamp (offline orders —
+	walk-in, phone-in, manual ERP) have no Wave-side picking workflow to defer
+	to, so the gate doesn't apply to them. stamp_wave_order_id runs on validate
+	and populates wave_order_id for any PL with at least one Wave-linked SO row,
+	so by the time before_submit fires the stamp is fresh and authoritative.
+	"""
 	settings = frappe.get_cached_doc("Wave Settings")
 	if not settings.get("pick_list_erp_submit_lockdown_enabled"):
 		return
 	if frappe.flags.get(INBOUND_SUBMIT_FLAG):
 		return
+	if not (doc.get("wave_order_id") or "").strip():
+		return  # Non-Wave Pick List — lockdown does not apply.
 	user = frappe.session.user
 	roles = set(frappe.get_roles(user))
 	if PICK_LIST_OVERRIDE_ROLE in roles or "System Manager" in roles:
