@@ -24,10 +24,14 @@ collecting payment — this app pushes the matching status back to Wave so
 the customer always sees the right state on their phone. It also keeps
 **stock balances** in sync the other way: when ERPNext records a stock
 movement, the new on-hand quantity is pushed to Wave so the storefront
-never sells what isn't on the shelf.
+never sells what isn't on the shelf. And for **offline orders** that
+originate in ERP — walk-in, phone, manual — an operator can click a
+"Push to Wave" button on the Sales Order form, which creates a matching
+order on Wave so it joins the same picker-app workflow as
+Wave-originated orders.
 
 That's it. Everything else in this document is detail on top of those
-two sentences.
+three sentences.
 
 ---
 
@@ -47,15 +51,23 @@ two sentences.
 │                       │     stock sync             │  - Payment Entry      │
 │                       │     order status           │                       │
 │                       │     pick batch IDs         │                       │
+│                       │     stock caps              │                       │
+│                       │                            │                       │
+│                       │ ◄── REST API (HTTPS) ───   │                       │
+│                       │     ERP → Wave order push  │                       │
+│                       │     (operator-triggered)   │                       │
 └───────────────────────┘                            └───────────────────────┘
 ```
 
 **Wave talks to us with webhooks** (Wave pushes us small JSON messages).
 We talk back **using Wave's REST API** (we make HTTPS calls to their
-servers). Both directions are gated by separate kill-switches in
+servers) on two distinct channels: automatic event-driven pushes (stock
+sync, order status, pick batch IDs, stock caps) and operator-triggered
+ERP → Wave order pushes (the "Push to Wave" button on offline Sales
+Orders). All three are gated by separate kill-switches in
 [Wave Settings](#the-wave-settings-page-every-knob-explained), so
-operators can shut off either channel without taking the whole
-integration down.
+operators can shut off any channel without taking the whole integration
+down.
 
 ---
 
@@ -232,7 +244,7 @@ flowchart LR
 
 ---
 
-## 4. The two end-to-end stories
+## 4. The three end-to-end stories
 
 ### 4.1 The inbound story — customer places an order on Wave
 
@@ -277,6 +289,62 @@ A simpler picture, but it runs constantly:
    number to Wave.
 6. If Wave replies "product not found" (`PRODUCT0006`) the cached id is
    refreshed and the call retried once.
+7. **If `Outbound Stock Caps Max Quantity Enabled` is on**, the worker
+   follows the stock POST with a `PATCH /admin/products/{id}` that
+   writes `quantityLimit = same quantity`, capping how much a single
+   customer order can claim to what's actually in stock. Mirror updates
+   on every stock push; PATCH failures log a Warning but never roll back
+   the stock push (partial success is acceptable).
+
+### 4.3 The reverse story — operator pushes an offline ERP order to Wave
+
+This is the channel that lets ERP-side ("offline") Sales Orders join
+Wave's picker app workflow. Triggered by an explicit operator click on a
+"Push to Wave" button — never automatic, so an operator can't push a
+draft they're still editing.
+
+| # | Stage | What you'd see in ERPNext | What the code is doing |
+|---|-------|---------------------------|------------------------|
+| 1 | Operator creates an SO manually (walk-in, phone, etc.) | Standard ERPNext SO; `wave_order_id` empty | No Wave Sync code involved yet |
+| 2 | Operator submits the SO | "Push to Wave" button appears in the Wave button group | Client script in `public/js/sales_order.js` checks `docstatus===1 && !wave_order_id && wave_origin !== "Wave Webhook"` |
+| 3 | Operator clicks Push to Wave + confirms | Confirmation dialog → loading spinner | Calls whitelisted `api/sales_order.push_to_wave(so_name)` |
+| 4 | Server pre-flight checks | Wave Sync Log row: `erp_to_wave_push_attempt` Info | `services/wave_order_creator.push_so_to_wave` validates kill switch, outbound config, `wave_shop_id`, already-pushed status — aborts silently if any precondition fails |
+| 5 | Customer resolved | (no UI change) | `services/wave_customer_resolver` returns the linked Customer's `wave_customer_id`, OR falls back to `Wave Settings.wave_common_offline_customer_id`. Hard-fails with notification if both blank. |
+| 6 | Each line's `wave_product_id` resolved | (no UI change yet) | Cached on Item; if blank, the existing `product_resolver` runs a by-SKU lookup on Wave. **If ANY line is unresolvable**, collects all of them into one error and hard-fails with notification BEFORE any Wave catalog GETs fire. |
+| 7 | Wave catalog GET per distinct SKU | (no UI change yet) | `wave_client.get_admin_product_by_id` fetches `name` (localised array), `vat`, `isWeighed`, `stepToUom`, `uom`, `unitOfMeasurement`, `categories` — backfilled into the order-line entry so the picker UI shows the real product name |
+| 8 | POST to Wave | Wave Sync Log row: full request body in `request_body` | `wave_client.create_admin_order` calls `POST /api/v3/admin/orders?skipWebhookNotification=true`. `skipWebhookNotification=true` prevents Wave from re-firing ORDER.CREATE at us immediately (dedup would catch it anyway, but suppression keeps the audit trail clean). |
+| 9 | Success — fields stamped on the SO | SO now shows `wave_order_id`, `wave_friendly_id`, `wave_origin = "ERP Push"`; success Comment on timeline; banner (if any) clears | `db_set` on four fields, `add_comment`, `log_step "erp_to_wave_push_succeeded"` Success. Endpoint returns `{ok: True, wave_order_id, wave_friendly_id, correlation_id}` — button JS shows a green alert and reloads the form. |
+| 10 | Wave's lifecycle takes over | Wave's picker app shows the order; ORDER.UPDATE webhooks reconcile back through the inbound flow | The order is now indistinguishable from a Wave-originated one in terms of downstream behaviour — picker reconciliation, DN/SI/PE outbound pushes, all the same |
+
+**The failure path** at stages 4–8 is **silent on the request, loud on
+the SO** — never throws an exception:
+
+1. `wave_push_failure_required_review = 1` → red banner on the form
+2. `doc.add_comment("Comment", "<b>Wave push failed:</b> ...")` →
+   persistent timeline entry with the specific reason
+3. Wave Sync Log row at Error level with the full request body / error
+4. If `wave_push_failure_todo_enabled` (default on) AND
+   `wave_intake_review_assignee` or `wave_intake_review_role` is
+   configured → High-priority ToDo linked to the SO
+5. Endpoint returns `{ok: False, reason, correlation_id}`; button JS
+   reloads the form (banner visible) then shows a `frappe.msgprint` with
+   the reason + correlation id
+
+Operator reads the Comment, fixes the issue (sets `wave_product_id` on
+the Item, fixes the Customer mapping, removes a bad line), and clicks
+Push to Wave again. On success the banner clears automatically.
+
+**Feedback-loop protection.** Three safety nets keep Wave's webhooks
+from double-processing the order we just pushed:
+
+1. `skipWebhookNotification=true` on the POST so Wave doesn't re-fire
+   ORDER.CREATE immediately.
+2. Even if Wave fires ORDER.CREATE later, `_find_existing_sales_order(wave_order_id)`
+   in `handlers/order_create.py` catches the duplicate and logs SKIPPED.
+3. **`CUSTOMER.UPDATE` for the configured common offline customer
+   short-circuits** at the top of `handlers/customer.py` — otherwise the
+   placeholder would accumulate every order's customer details as
+   webhook events fire for it.
 
 ---
 
@@ -321,14 +389,31 @@ These are the credentials the app uses to call **into** Wave.
 |-------|--------------|
 | **Wave API Base URL** | The Wave REST root, e.g. `https://dev.hypaafrica.api.wavegrocery.com`. |
 | **Wave App ID** | Sent as the `appId` HTTP header on every outbound call. Wave provides it when this app is registered with them. |
-| **Wave Store ID** | Identifies which Wave store this ERP instance mirrors. Default `1` for single-shop deployments. Sent in the body of stock-sync calls so Wave knows which storefront the qty applies to. |
+| **Wave Store ID** | Identifies which Wave store this ERP instance mirrors. Default `1` for single-shop deployments. Sent in the body of stock-sync calls so Wave knows which storefront the qty applies to. **Not the same as Wave Shop ID** (below) — that's the longer mongo `_id`. |
+| **Wave Shop ID (mongo _id)** | The long hex `_id` of the shop (e.g. `698ef51f728782a10adcef6d`). Used as `shopId` when ERP pushes orders to Wave. Get it from any Wave order payload's `shop._id` or from the Wave admin UI. |
 | **Wave API Key** | The secret sent in `X-API-Key` on every outbound call. Stored encrypted. |
 | **Outbound Stock Sync Enabled** | Independent kill-switch for stock pushes. When off, SLEs still log but no HTTP call goes out. Mute traffic during cutovers without disabling order intake. |
+| **Outbound Stock Caps Max Quantity Enabled** | Off by default. When on, every stock-sync push is followed by a `PATCH` that writes `quantityLimit = same quantity`, capping how much a single customer order can claim to what's actually in stock. Failure on the second call logs a Warning but does not roll back the stock push. |
 | **Outbound Order Status Sync Enabled** | Independent kill-switch for order-status pushes. When off, Sales Order / DN / SI / PE submits are still observed and logged, but no PUT goes to Wave. |
-| **Pick List Batch IDs Push Enabled** | Off by default. When on, every Pick List creation also sends Wave a list of `{item, batch numbers}` so the Wave-side order knows which inventory batches will be dispatched. Independent of the Pick List ACCEPTED status push (which is governed by the Outbound Status Rules table). |
-| **Pick List ERP Submit Lockdown Enabled** | Off by default. When on, only users with the `Pick List Wave Override` role (or System Manager) can submit or cancel a Pick List directly from the Desk. Use once Wave is the source of truth for picking — direct ERP submits then become a manager-only escape hatch. |
+| **Pick List Batch IDs Push Enabled** | Off by default. When on, every Pick List creation sends Wave a list of `{item, identifiers}` per line so the Wave-side order knows what the picker should scan. Identifiers are batch numbers, SKU, or Item Barcode depending on **Picker Identifier Source** below. Each product also gets a `comments` string listing the canonical ERP batch + qty allocation, regardless of which identifier mode is active. Independent of the Pick List ACCEPTED status push (which is governed by the Outbound Status Rules table). |
+| **Picker Identifier Source** | What identifier the picker app scans per Pick List line. Blank (default) sends ERPNext batch numbers (one per allocated batch row, preserving FEFO/FIFO). `Item Code` sends the SKU itself (one identifier per SKU). `Item Barcode` sends the first row of the Item's Barcodes child table (one identifier per SKU); throws when the Item has no barcode rows. The inbound reconciliation expects Wave to echo back the same identifier — mismatches block auto-submit for operator review. |
+| **Pick List ERP Submit Lockdown Enabled** | Off by default. When on, **Wave-sourced** Pick Lists require the `Pick List Wave Override` role (or System Manager) for ERP-side submit and cancel. **Offline Pick Lists** (no `wave_order_id`) are unaffected and submit normally — operators can process walk-in orders without the override role. Use once Wave is the source of truth for its own picking. |
+| **Wave Pickup Driver** | Driver auto-stamped on Delivery Notes whose linked Wave SO is a Pickup order (i.e. `wave_delivery_type = "Pickup"`, derived at intake from `payload.fees`). Leave blank to skip — operators then pick the driver manually. The auto-stamp only applies on DN `before_insert` when the driver field is empty; later operator edits are never overwritten. |
 
-### Section 4 — ERP Defaults
+### Section 4 — ERP → Wave Order Push
+
+Governs the operator-triggered push of offline ERP Sales Orders to Wave
+(the third end-to-end story in Section 4.3 above). All fields default to
+off / blank so existing sites are no-ops until ops opts in.
+
+| Field | What it does |
+|-------|--------------|
+| **ERP → Wave Order Push Enabled** | The master switch. When off, the "Push to Wave" button on the SO form returns a "feature disabled" message and refuses to fire. Default off. |
+| **Common Offline Customer (Wave _id)** | The Wave mongo `_id` of the placeholder customer used as the fallback when an ERP Customer has no `wave_customer_id`. Operators create a "Walk-in / Offline" customer on Wave admin and paste its `_id` here. Pushes fail with a notification if this is blank AND the linked Customer has no cached Wave id. **CUSTOMER.UPDATE webhooks for this id are short-circuited** so Wave's lifecycle events for the placeholder never mirror back into ERP. |
+| **Default Offline Payment Type** | `paymentType` sent on every ERP-pushed order. Must match one of Wave's enum values (`cash`, `card`, `klarna`, `mobile`, `thirdPartyReference`, `cardOnDelivery`, `bankTransfer`, `irisOnDelivery`). Default `"cash"`. |
+| **Push Failure ToDo Enabled** | When on (default), a failed push also creates a High-priority Frappe ToDo linked to the SO, assigned to the **same Intake Review Assignee / Role** used for intake-time reviews. Comment + banner are always added; only the ToDo is gated by this. |
+
+### Section 5 — ERP Defaults
 
 These get applied to every Sales Order created from a Wave webhook.
 
@@ -343,7 +428,7 @@ These get applied to every Sales Order created from a Wave webhook.
 | **Default Territory** | Territory for newly-created customers. |
 | **Walk-in Customer** | Fallback Customer for guest orders (payload `isGuest=true`). Must already exist in ERP. |
 
-### Section 5 — Rules (the heart of the integration)
+### Section 6 — Rules (the heart of the integration)
 
 All rules are read **at dispatch time**, so a change takes effect on the
 very next webhook — no deploy, no restart.
@@ -436,7 +521,10 @@ several ERPNext DocTypes:
 - **Item**: `wave_product_id` (the cached Wave internal id)
 - **Sales Order**: `wave_order_id`, `wave_friendly_id`, `wave_status`,
   `wave_correlation_id`, `wave_payment_*` fields, `wave_comments`,
-  `wave_manual_review_required`
+  `wave_manual_review_required`, `wave_delivery_type` (Delivery / Pickup,
+  derived at intake from `payload.fees`), `wave_origin` (Wave Webhook /
+  ERP Push — provenance flag), `wave_push_failure_required_review`
+  (drives the red banner when an ERP → Wave push fails).
 - **Pick List / Delivery Note / Sales Invoice / Payment Entry**: each
   carries `wave_order_id` so they are filterable in the Desk and the
   status push knows where to send the update.
@@ -507,19 +595,47 @@ When a Pick List is saved (`after_insert`):
 2. **Batch IDs push channel.** Gated by its own switch,
    **Pick List Batch IDs Push Enabled**. When on, the handler walks
    `locations[]`, groups by linked Sales Order's `wave_order_id` then by
-   item, collects distinct batch numbers, and PATCHes Wave's
-   `/admin/orders/{id}/products` with the batch lists. One worker job
+   item, and PATCHes Wave's `/admin/orders/{id}/products` with one
+   entry per (productId, identifiers, comments) tuple. One worker job
    per Wave order — multi-source Pick Lists fan out cleanly.
+
+   What goes into each entry's `batchIds` list is governed by
+   **Picker Identifier Source**:
+   - Blank → batch numbers per allocated row (preserves ERPNext FEFO/FIFO).
+   - `Item Code` → `[sku]` per SKU (one identifier, consolidates rows).
+   - `Item Barcode` → `[first barcode row]` per SKU (one identifier).
+
+   Each entry also carries a `comments` string listing the canonical
+   ERP batch + qty allocation (e.g. `- BATCH-A: 3\n- BATCH-B: 2`).
+   The comment is independent of the identifier source — in `Item Code`
+   / `Item Barcode` modes it's the only place where Wave shows the
+   batch-level breakdown the picker needs.
 
 Both channels are orthogonal. You can run with: status on / batches on,
 status on / batches off, status off / batches on, or both off.
 
-The **Pick List ERP Submit Lockdown** switch is a third, related
+**Inbound multi-batch reconciliation.** When Wave fires
+`ORDER.UPDATE pickerStatus=COLLECTED`, the inbound handler:
+
+1. Groups ERP Pick List rows by `item_code`, preserving FEFO order.
+2. Greedy-fills `picked_qty` across rows from Wave's reported total
+   (row 1 takes its `qty` first, then row 2, …).
+3. **Never overwrites `row.batch_no`** — ERPNext's allocation is the
+   authoritative record of what physically left the shelf.
+4. Computes a per-SKU verdict: `clean`, `shortfall`, `overpick`,
+   `identifier_mismatch`, `removed`, `missing_in_erp`.
+5. Any non-clean verdict suppresses auto-submit and leaves the doc in
+   Draft with a Comment per disparity. Operator reviews, amends as
+   needed, submits manually.
+
+**The Pick List ERP Submit Lockdown** switch is a third, related
 concern: when on, only users with the `Pick List Wave Override` role
-can directly submit or cancel a Pick List from the Desk. Wave's inbound
-COLLECTED webhook submits via a special flag that bypasses the lockdown,
-which is why the lockdown can be enforced without breaking the picker
-app loop.
+can directly submit or cancel a Pick List from the Desk. **The lockdown
+applies only to Wave-sourced Pick Lists** (those with a stamped
+`wave_order_id`); offline-order Pick Lists submit normally regardless,
+so operators can process walk-in / phone-in orders without the override
+role. Wave's inbound COLLECTED webhook submits via a special flag that
+also bypasses the lockdown.
 
 ---
 
@@ -569,10 +685,16 @@ A few common operations, mapped to where you do them:
 | Re-trigger an order Wave never sent | Have Wave re-fire the webhook (the queue's dedup key includes `updatedAt`, so Wave bumping that produces a fresh run) |
 | Debug why an order didn't create | Open the SO's `wave_correlation_id` → filter Wave Sync Log by that ID → read top-to-bottom |
 | Resync all stock to Wave | Wave Settings → "Resync Stock" button, or the Item form / Item list bulk action |
+| Mirror ERP stock as Wave's per-order Max Quantity | Wave Settings → **Outbound Stock Caps Max Quantity Enabled** on; every stock push will also PATCH `quantityLimit` to match |
 | Find every Wave-sourced SO | Sales Order list → filter on `wave_order_id` not empty |
 | See what's flagged for review | Wave Settings → ToDo list (if Intake Review ToDo Enabled), or filter SO on `wave_manual_review_required=1` |
 | Rotate the inbound API key | Wave Settings → **Inbound API Key**, then update Wave's side and save |
-| Stop letting humans submit Pick Lists from the Desk | Wave Settings → **Pick List ERP Submit Lockdown Enabled** on |
+| Stop letting humans submit Wave-sourced Pick Lists from the Desk | Wave Settings → **Pick List ERP Submit Lockdown Enabled** on (offline PLs unaffected) |
+| Push an offline ERP Sales Order to Wave | Submit the SO → click **"Push to Wave"** in the Wave button group on the SO form |
+| Investigate a failed ERP → Wave push | Open the SO → read the red banner + the failure Comment on the timeline → fix the issue → click **Push to Wave** again to retry |
+| Set up the operator who handles push-failure ToDos | Wave Settings → **Intake Review Assignee / Role** (reused; same operator handles both intake-review and push-failure escalations). Mute push ToDos specifically via **Push Failure ToDo Enabled** |
+| Choose what the picker app scans | Wave Settings → **Picker Identifier Source** (blank=batch numbers, `Item Code`, `Item Barcode`) |
+| Configure auto-driver on pickup-type Delivery Notes | Wave Settings → **Wave Pickup Driver** → pick a Driver |
 
 ---
 
@@ -589,8 +711,19 @@ made, not just what it does. Good starting files:
   business-heavy handler; reading it explains 80% of intake
 - `wave_sync_hypa/wave_sync_hypa/handlers/order_status.py` and
   `services/order_status_pusher.py` — the outbound spine
+- `wave_sync_hypa/wave_sync_hypa/handlers/order_update.py` — inbound
+  multi-batch reconciliation when Wave reports `COLLECTED`
+- `wave_sync_hypa/wave_sync_hypa/services/picker_identifier.py` — single
+  source of truth for what the picker app scans (both outbound dispatch
+  and inbound interpretation)
 - `wave_sync_hypa/wave_sync_hypa/services/payment_validator.py` — the
   most opinionated piece of business logic in the codebase
+- `wave_sync_hypa/wave_sync_hypa/services/wave_order_creator.py` — the
+  ERP → Wave order push orchestrator (operator-triggered)
+- `wave_sync_hypa/wave_sync_hypa/services/wave_order_builder.py` — how
+  ERP SO data + Wave catalog data merge into an OrderV3 POST body
+- `wave_sync_hypa/wave_sync_hypa/api/sales_order.py` — the `push_to_wave`
+  whitelisted endpoint + the manual-review acknowledge flow
 - `wave_sync_hypa/wave_sync_hypa/doctype/wave_settings/wave_settings.json`
   — the canonical list of every setting, with the description shown in
   the Desk tooltip

@@ -11,13 +11,14 @@ from frappe.tests.utils import FrappeTestCase
 from wave_sync_hypa.wave_sync_hypa.services import intake_review_notifier as irn
 
 
-def _settings(*, enabled=1, assignee="", role="") -> MagicMock:
-	"""Wave Settings stand-in carrying the three ToDo fields."""
+def _settings(*, enabled=1, assignee="", role="", push_failure_enabled=1) -> MagicMock:
+	"""Wave Settings stand-in carrying the four ToDo-related fields."""
 	doc = MagicMock(name="WaveSettings")
 	doc.get.side_effect = lambda key, default=None: {
 		"wave_intake_review_todo_enabled": enabled,
 		"wave_intake_review_assignee": assignee,
 		"wave_intake_review_role": role,
+		"wave_push_failure_todo_enabled": push_failure_enabled,
 	}.get(key, default)
 	return doc
 
@@ -148,3 +149,41 @@ class TestNotifyIntakeAborted(FrappeTestCase):
 		self.assertIsNone(todo_dict["reference_name"])
 		# Friendly id surfaces in the body so the recipient knows what to look up.
 		self.assertIn("10000070", todo_dict["description"])
+
+
+class TestNotifySalesOrderPushFailed(FrappeTestCase):
+	"""High-priority ToDo linked to the SO when ERP -> Wave push fails."""
+
+	def test_creates_high_priority_todo_linked_to_so(self):
+		settings = _settings(assignee="ops@example.com", push_failure_enabled=1)
+		with (
+			patch.object(frappe.db, "exists", return_value=True),
+			patch.object(frappe.db, "get_value", return_value=1),
+			patch.object(frappe, "get_doc", return_value=MagicMock()) as mock_get_doc,
+		):
+			created = irn.notify_sales_order_push_failed(
+				"SAL-ORD-2026-99999", settings, "items [JTD099] not in Wave catalog",
+			)
+		self.assertEqual(created, 1)
+		todo_dict = mock_get_doc.call_args.args[0]
+		self.assertEqual(todo_dict["priority"], "High")
+		self.assertEqual(todo_dict["reference_type"], "Sales Order")
+		self.assertEqual(todo_dict["reference_name"], "SAL-ORD-2026-99999")
+		self.assertIn("SAL-ORD-2026-99999", todo_dict["description"])
+		self.assertIn("JTD099", todo_dict["description"])
+		self.assertIn("Push to Wave", todo_dict["description"])
+
+	def test_returns_zero_when_push_failure_toggle_off(self):
+		"""Independent of the intake-review toggle — push-failure has its own switch."""
+		settings = _settings(assignee="ops@example.com", push_failure_enabled=0, enabled=1)
+		with patch.object(frappe, "get_doc") as mock_get_doc:
+			created = irn.notify_sales_order_push_failed("SAL-ORD-X", settings, "anything")
+		self.assertEqual(created, 0)
+		mock_get_doc.assert_not_called()
+
+	def test_returns_zero_when_no_recipients_configured(self):
+		settings = _settings(assignee="", role="", push_failure_enabled=1)
+		with patch.object(frappe, "get_doc") as mock_get_doc:
+			created = irn.notify_sales_order_push_failed("SAL-ORD-X", settings, "anything")
+		self.assertEqual(created, 0)
+		mock_get_doc.assert_not_called()

@@ -17,6 +17,7 @@ from __future__ import annotations
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services import (
+	intake_review_notifier,
 	wave_client,
 	wave_customer_resolver,
 	wave_order_builder,
@@ -47,14 +48,14 @@ def push_so_to_wave(so_name: str, correlation_id: str) -> dict:
 	config = _resolve_outbound_config(settings)
 	if config is None:
 		return _abort_with_notification(
-			so_name, correlation_id, STEP_PUSH_ABORTED_MISSING_CONFIG,
+			so_name, settings, correlation_id, STEP_PUSH_ABORTED_MISSING_CONFIG,
 			"Wave outbound config incomplete (base_url / api_key / app_id).",
 		)
 
 	shop_id = (settings.get("wave_shop_id") or "").strip()
 	if not shop_id:
 		return _abort_with_notification(
-			so_name, correlation_id, STEP_PUSH_ABORTED_MISSING_SHOP,
+			so_name, settings, correlation_id, STEP_PUSH_ABORTED_MISSING_SHOP,
 			"Wave Settings → ERP → Wave Order Push → Wave Shop ID is not configured.",
 		)
 
@@ -73,14 +74,14 @@ def push_so_to_wave(so_name: str, correlation_id: str) -> dict:
 	try:
 		customer_id = wave_customer_resolver.resolve_wave_customer_for_so(so, settings)
 	except WaveResolutionError as exc:
-		return _abort_with_notification(so_name, correlation_id, STEP_PUSH_FAILED, str(exc))
+		return _abort_with_notification(so_name, settings, correlation_id, STEP_PUSH_FAILED, str(exc))
 
 	try:
 		body = wave_order_builder.build_order_payload(so, customer_id, settings, correlation_id, config)
 	except WaveResolutionError as exc:
-		return _abort_with_notification(so_name, correlation_id, STEP_PUSH_ABORTED_UNRESOLVABLE, str(exc))
+		return _abort_with_notification(so_name, settings, correlation_id, STEP_PUSH_ABORTED_UNRESOLVABLE, str(exc))
 	except WaveOutboundError as exc:
-		return _abort_with_notification(so_name, correlation_id, STEP_PUSH_FAILED, f"Catalog GET failed: {exc}")
+		return _abort_with_notification(so_name, settings, correlation_id, STEP_PUSH_FAILED, f"Catalog GET failed: {exc}")
 
 	try:
 		response = wave_client.create_admin_order(
@@ -91,13 +92,13 @@ def push_so_to_wave(so_name: str, correlation_id: str) -> dict:
 			skip_webhook_notification=True,
 		)
 	except WaveOutboundError as exc:
-		return _abort_with_notification(so_name, correlation_id, STEP_PUSH_FAILED, f"Wave POST failed: {exc}")
+		return _abort_with_notification(so_name, settings, correlation_id, STEP_PUSH_FAILED, f"Wave POST failed: {exc}")
 
 	wave_order_id = (response.get("_id") or "").strip()
 	wave_friendly_id = (response.get("friendlyId") or "").strip()
 	if not wave_order_id:
 		return _abort_with_notification(
-			so_name, correlation_id, STEP_PUSH_FAILED,
+			so_name, settings, correlation_id, STEP_PUSH_FAILED,
 			"Wave POST returned 201 but no _id in the response body.",
 		)
 
@@ -133,8 +134,8 @@ def _stamp_success(
 	)
 
 
-def _abort_with_notification(so_name: str, correlation_id: str, step: str, reason: str) -> dict:
-	"""Notify-the-operator failure path: banner + Comment + Error log row."""
+def _abort_with_notification(so_name: str, settings, correlation_id: str, step: str, reason: str) -> dict:
+	"""Notify-the-operator failure path: banner + Comment + ToDo + Error log row."""
 	so = frappe.get_doc("Sales Order", so_name)
 	so.db_set("wave_push_failure_required_review", 1, update_modified=False)
 	so.add_comment("Comment", f"<b>Wave push failed:</b> {reason}")
@@ -143,6 +144,13 @@ def _abort_with_notification(so_name: str, correlation_id: str, step: str, reaso
 		doc_type="Sales Order", linked_doctype="Sales Order", linked_docname=so_name,
 		error_message=reason,
 	)
+	# Best-effort ToDo creation — gated by wave_push_failure_todo_enabled in Wave
+	# Settings. Failures here don't propagate; the banner + Comment + log row are
+	# the canonical notification surfaces.
+	try:
+		intake_review_notifier.notify_sales_order_push_failed(so_name, settings, reason)
+	except Exception:
+		pass
 	return {"ok": False, "reason": reason}
 
 

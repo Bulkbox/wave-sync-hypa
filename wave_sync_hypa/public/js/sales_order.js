@@ -8,12 +8,30 @@
 frappe.ui.form.on("Sales Order", {
 	refresh(frm) {
 		const is_draft = frm.doc.docstatus === 0;
+		const is_submitted = frm.doc.docstatus === 1;
 		if (is_draft && frm.doc.wave_manual_review_required) {
 			_render_manual_review_banner(frm);
 			_add_clear_review_button(frm);
 		}
+		if (frm.doc.wave_push_failure_required_review) {
+			_render_push_failure_banner(frm);
+		}
 		if (!frm.is_new() && frm.doc.wave_order_id) {
 			_add_resync_status_button(frm);
+		}
+		// "Push to Wave" / "Send Order to Wave" surfaces only for ERP-side
+		// orders that haven't been pushed yet. Submitted-only so an operator
+		// can't push a draft they might still be editing. Wave-webhook-originated
+		// SOs are excluded regardless of wave_order_id state (they're Wave's
+		// order already). The button label flips to "Send Order to Wave" when
+		// a prior push failed (wave_push_failure_required_review=1) so the
+		// operator clearly understands they're retrying after a fix.
+		if (
+			is_submitted
+			&& !frm.doc.wave_order_id
+			&& frm.doc.wave_origin !== "Wave Webhook"
+		) {
+			_add_push_to_wave_button(frm, frm.doc.wave_push_failure_required_review);
 		}
 	},
 });
@@ -100,6 +118,79 @@ function _call_resync_status_endpoint(frm) {
 					r.message.correlation_id,
 				]),
 				indicator: "green",
+			});
+		},
+	});
+}
+
+// Red banner surfaced when the last ERP -> Wave push failed and the issue
+// hasn't been resolved (wave_push_failure_required_review = 1). The
+// Comments section carries the exact reason + remediation hints; this is
+// just the visible "something needs attention" signal at the top of the form.
+function _render_push_failure_banner(frm) {
+	frm.set_intro(
+		__(
+			"Wave Sync — ERP → Wave push failed. See the Comments section below for the specific reason and remediation. After fixing, click 'Send Order to Wave' above to retry."
+		),
+		"red"
+	);
+}
+
+// "Push to Wave" / "Send Order to Wave" — operator-triggered offline-order
+// push. Visible only on submitted, ERP-side SOs that haven't been pushed yet.
+// Server-side checks the kill-switch + customer + product mappings; failures
+// surface via banner + Comment + ToDo (never a hard JS error). Label flips
+// to "Send Order to Wave" on retry so operators know they're acting after
+// a prior failure.
+function _add_push_to_wave_button(frm, is_retry) {
+	const label = is_retry ? __("Send Order to Wave") : __("Push to Wave");
+	frm.add_custom_button(
+		label,
+		() => _confirm_push_to_wave(frm, is_retry),
+		__("Wave")
+	);
+}
+
+function _confirm_push_to_wave(frm, is_retry) {
+	const prompt = is_retry
+		? __(
+				"Retry pushing this Sales Order to Wave? Make sure the issue listed in the Comments has been fixed. Idempotent — safe to keep retrying."
+			)
+		: __(
+				"Push this Sales Order to Wave? This creates a corresponding order in Wave's catalog so the picker app can fulfil it. Idempotent — safe to retry on failure."
+			);
+	frappe.confirm(prompt, () => _call_push_to_wave_endpoint(frm));
+}
+
+function _call_push_to_wave_endpoint(frm) {
+	frappe.call({
+		method: "wave_sync_hypa.wave_sync_hypa.api.sales_order.push_to_wave",
+		args: { sales_order: frm.doc.name },
+		freeze: true,
+		freeze_message: __("Pushing to Wave..."),
+		callback(r) {
+			const result = r.message || {};
+			if (result.ok) {
+				frappe.show_alert({
+					message: __("Pushed to Wave: wave_order_id {0} (friendlyId {1}).", [
+						result.wave_order_id,
+						result.wave_friendly_id || "—",
+					]),
+					indicator: "green",
+				});
+				frm.reload_doc();
+				return;
+			}
+			// Failure: server already set the banner + Comment + ToDo;
+			// reload so the operator sees the banner, then show the reason.
+			frm.reload_doc();
+			frappe.msgprint({
+				title: __("Wave push failed"),
+				message: __("{0}<br><br>Correlation: <code>{1}</code>", [
+					frappe.utils.escape_html(result.reason || "Unknown error."),
+					result.correlation_id || "—",
+				]),
+				indicator: "red",
 			});
 		},
 	});

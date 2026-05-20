@@ -1,9 +1,12 @@
-"""Unit tests for api.sales_order.clear_manual_review_flag."""
+"""Unit tests for api.sales_order: clear_manual_review_flag + push_to_wave."""
+
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from wave_sync_hypa.wave_sync_hypa.api.sales_order import clear_manual_review_flag
+from wave_sync_hypa.wave_sync_hypa.api import sales_order as so_api
+from wave_sync_hypa.wave_sync_hypa.api.sales_order import clear_manual_review_flag, push_to_wave
 
 
 class TestClearManualReviewFlag(FrappeTestCase):
@@ -120,3 +123,56 @@ class TestClearManualReviewFlag(FrappeTestCase):
 			int(frappe.db.get_value("Sales Order", self.sales_order, "wave_manual_review_required") or 0),
 			1,
 		)
+
+
+class TestPushToWave(FrappeTestCase):
+	"""Unit tests for the push_to_wave whitelisted endpoint (delegates to wave_order_creator)."""
+
+	def test_delegates_to_creator_and_forwards_success_result(self):
+		"""Happy path: API returns the creator's result + adds correlation_id."""
+		fake_doc = MagicMock(name="SalesOrderDoc")
+		fake_doc.check_permission.return_value = None
+		creator_result = {"ok": True, "wave_order_id": "wave-x", "wave_friendly_id": "10001"}
+		with (
+			patch.object(frappe, "get_doc", return_value=fake_doc),
+			patch.object(so_api.wave_order_creator, "push_so_to_wave", return_value=dict(creator_result)) as mock_push,
+			patch.object(so_api, "new_correlation_id", return_value="corr-happy"),
+			patch.object(frappe.db, "commit"),
+		):
+			result = push_to_wave("SAL-ORD-X")
+		fake_doc.check_permission.assert_called_once_with("write")
+		mock_push.assert_called_once_with("SAL-ORD-X", "corr-happy")
+		self.assertEqual(result["ok"], True)
+		self.assertEqual(result["wave_order_id"], "wave-x")
+		self.assertEqual(result["wave_friendly_id"], "10001")
+		self.assertEqual(result["correlation_id"], "corr-happy")
+
+	def test_delegates_to_creator_and_forwards_failure_result(self):
+		"""Failure path: API returns the creator's {ok: False, reason} + adds correlation_id."""
+		fake_doc = MagicMock(name="SalesOrderDoc")
+		fake_doc.check_permission.return_value = None
+		creator_result = {"ok": False, "reason": "missing wave_product_id for [JTD099]"}
+		with (
+			patch.object(frappe, "get_doc", return_value=fake_doc),
+			patch.object(so_api.wave_order_creator, "push_so_to_wave", return_value=dict(creator_result)),
+			patch.object(so_api, "new_correlation_id", return_value="corr-fail"),
+			patch.object(frappe.db, "commit"),
+		):
+			result = push_to_wave("SAL-ORD-Y")
+		self.assertFalse(result["ok"])
+		self.assertIn("JTD099", result["reason"])
+		self.assertEqual(result["correlation_id"], "corr-fail")
+
+	def test_check_permission_runs_before_creator(self):
+		"""PermissionError from check_permission must short-circuit before any push happens."""
+		fake_doc = MagicMock(name="SalesOrderDoc")
+		fake_doc.check_permission.side_effect = frappe.PermissionError("no write")
+		with (
+			patch.object(frappe, "get_doc", return_value=fake_doc),
+			patch.object(so_api.wave_order_creator, "push_so_to_wave") as mock_push,
+			patch.object(so_api, "new_correlation_id"),
+			patch.object(frappe.db, "commit"),
+		):
+			with self.assertRaises(frappe.PermissionError):
+				push_to_wave("SAL-ORD-Z")
+		mock_push.assert_not_called()
