@@ -25,9 +25,9 @@ def _settings(source: str = "") -> MagicMock:
 	return settings
 
 
-def _row(item_code: str = "JTD011", batch_no: str = "") -> SimpleNamespace:
+def _row(item_code: str = "JTD011", batch_no: str = "", qty: float = 0) -> SimpleNamespace:
 	"""Pick List location-row stand-in carrying only the attributes the module reads."""
-	return SimpleNamespace(item_code=item_code, batch_no=batch_no)
+	return SimpleNamespace(item_code=item_code, batch_no=batch_no, qty=qty)
 
 
 class TestIdentifiersForSkuOutbound(FrappeTestCase):
@@ -103,3 +103,46 @@ class TestIdentifierMatchesInbound(FrappeTestCase):
 				pi.identifier_matches_inbound("", rows, _settings(source=source)),
 				f"empty wave_id should be a match under source={source!r}",
 			)
+
+
+class TestCommentForSkuOutbound(FrappeTestCase):
+	"""Per-product picker comment: bullet-only, deterministic, independent of source mode."""
+
+	def test_multi_batch_produces_one_bullet_per_batch(self):
+		rows = [_row(batch_no="BATCH-A", qty=3), _row(batch_no="BATCH-B", qty=2)]
+		self.assertEqual(
+			pi.comment_for_sku_outbound(rows),
+			"- BATCH-A: 3\n- BATCH-B: 2",
+		)
+
+	def test_single_batch_produces_single_bullet(self):
+		rows = [_row(batch_no="BATCH-A", qty=5)]
+		self.assertEqual(pi.comment_for_sku_outbound(rows), "- BATCH-A: 5")
+
+	def test_non_batch_tracked_renders_no_batch_tracking_line(self):
+		rows = [_row(batch_no="", qty=5)]
+		self.assertEqual(pi.comment_for_sku_outbound(rows), "- 5 (no batch tracking)")
+
+	def test_mixed_batched_and_unbatched_rows(self):
+		"""Rare but possible: same SKU split across batched and unbatched rows."""
+		rows = [
+			_row(batch_no="BATCH-A", qty=3),
+			_row(batch_no="", qty=2),
+		]
+		self.assertEqual(
+			pi.comment_for_sku_outbound(rows),
+			"- BATCH-A: 3\n- 2 (no batch tracking)",
+		)
+
+	def test_empty_rows_returns_empty_string(self):
+		self.assertEqual(pi.comment_for_sku_outbound([]), "")
+
+	def test_float_quantity_renders_without_trailing_zero(self):
+		"""qty=3.0 renders as '3', not '3.0'."""
+		rows = [_row(batch_no="BATCH-A", qty=3.0)]
+		self.assertEqual(pi.comment_for_sku_outbound(rows), "- BATCH-A: 3")
+
+	def test_fractional_quantity_preserved(self):
+		"""qty=2.5 (weighed items) renders as '2.5'."""
+		rows = [_row(batch_no="BATCH-A", qty=2.5)]
+		self.assertEqual(pi.comment_for_sku_outbound(rows), "- BATCH-A: 2.5")

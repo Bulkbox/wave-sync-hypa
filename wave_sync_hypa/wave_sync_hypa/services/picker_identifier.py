@@ -103,6 +103,55 @@ def identifier_matches_inbound(wave_id: str, rows: list, settings) -> bool:
 	return wave_id in row_batches
 
 
+def comment_for_sku_outbound(rows: list) -> str:
+	"""Return the picker-facing pick allocation comment for one SKU's rows.
+
+	Format is deterministic and independent of picker_identifier_source —
+	the comment always lists the ERP batch allocation from Pick List Item
+	rows, even when batchIds carries SKU or barcode instead. Bullet-only
+	per the project's chosen style (no SKU header).
+
+	Three shapes:
+
+	  Multi/single-batch:    "- BATCH-A: 3\\n- BATCH-B: 2"
+	  Non-batch-tracked:     "- 5 (no batch tracking)"
+	  Mixed (rare):          batched bullets + a final "(no batch tracking)" line
+	"""
+	if not rows:
+		return ""
+	batched: list[tuple[str, float]] = []
+	unbatched_qty = 0.0
+	for row in rows:
+		batch = _row_field(row, "batch_no")
+		qty = _row_qty(row)
+		if batch:
+			batched.append((batch, qty))
+		else:
+			unbatched_qty += qty
+	lines: list[str] = [f"- {batch}: {_fmt_qty(qty)}" for batch, qty in batched]
+	if unbatched_qty > 0 or not batched:
+		lines.append(f"- {_fmt_qty(unbatched_qty)} (no batch tracking)")
+	return "\n".join(lines)
+
+
+def _row_qty(row) -> float:
+	"""Read row.qty whether the row is a Frappe doc, a _dict, or a plain dict."""
+	if hasattr(row, "get") and not hasattr(row, "qty"):
+		raw = row.get("qty")
+	else:
+		raw = getattr(row, "qty", 0)
+	try:
+		return float(raw or 0)
+	except (TypeError, ValueError):
+		return 0.0
+
+
+def _fmt_qty(qty: float) -> str:
+	"""Trim trailing '.0' so integer quantities render as '3' not '3.0'."""
+	as_int = int(qty)
+	return str(as_int) if float(as_int) == qty else f"{qty:g}"
+
+
 def _read_source(settings) -> str:
 	"""Pull the source string off Wave Settings; treat None / missing as blank."""
 	return (settings.get("picker_identifier_source") or "").strip()

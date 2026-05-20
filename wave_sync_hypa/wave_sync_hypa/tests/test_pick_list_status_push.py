@@ -45,12 +45,13 @@ def _pl(
 	return doc
 
 
-def _row(sales_order: str | None, item_code: str = "", batch_no: str = "") -> dict:
+def _row(sales_order: str | None, item_code: str = "", batch_no: str = "", qty: float = 0) -> dict:
 	"""Pick List Item row carrying just enough surface for the handler to walk SO + item + batch."""
 	return {
 		"sales_order": sales_order or "",
 		"item_code": item_code,
 		"batch_no": batch_no,
+		"qty": qty,
 	}
 
 
@@ -184,10 +185,10 @@ class TestAfterPickListInsert(FrappeTestCase):
 		"""Check on: one frappe.enqueue per Wave order, each with grouped+deduped products_data."""
 		# Two SOs map to two Wave orders. Two rows per SO with item batches.
 		doc = _pl(locations=[
-			_row("SO-001", item_code="JTD011", batch_no="B-001"),
-			_row("SO-001", item_code="JTD011", batch_no="B-001"),  # dup -> deduped
-			_row("SO-001", item_code="MILK", batch_no="B-M-9"),
-			_row("SO-002", item_code="JTD011", batch_no="B-X"),
+			_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
+			_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),  # dup -> deduped batch
+			_row("SO-001", item_code="MILK", batch_no="B-M-9", qty=2),
+			_row("SO-002", item_code="JTD011", batch_no="B-X", qty=4),
 		])
 
 		def _by_so(*args, **kwargs):
@@ -205,18 +206,18 @@ class TestAfterPickListInsert(FrappeTestCase):
 		# One enqueue per Wave order.
 		self.assertEqual(mock_enqueue.call_count, 2)
 		by_wave = {c.kwargs["wave_order_id"]: c.kwargs for c in mock_enqueue.call_args_list}
-		# Wave-A: JTD011 picked from B-001 (deduped) + MILK picked from B-M-9.
+		# Wave-A: JTD011 picked from B-001 (deduped) + MILK picked from B-M-9. Comments list every row.
 		self.assertEqual(
 			by_wave[WAVE_ID_A]["products_data"],
 			[
-				{"item_code": "JTD011", "batch_ids": ["B-001"]},
-				{"item_code": "MILK", "batch_ids": ["B-M-9"]},
+				{"item_code": "JTD011", "batch_ids": ["B-001"], "comments": "- B-001: 3\n- B-001: 3"},
+				{"item_code": "MILK", "batch_ids": ["B-M-9"], "comments": "- B-M-9: 2"},
 			],
 		)
 		# Wave-B: just JTD011 from B-X.
 		self.assertEqual(
 			by_wave[WAVE_ID_B]["products_data"],
-			[{"item_code": "JTD011", "batch_ids": ["B-X"]}],
+			[{"item_code": "JTD011", "batch_ids": ["B-X"], "comments": "- B-X: 4"}],
 		)
 		# enqueue_after_commit so the worker only fires after the in-memory PL is persisted.
 		for c in mock_enqueue.call_args_list:
@@ -255,10 +256,10 @@ class TestAfterPickListInsert(FrappeTestCase):
 		self.assertIn(pl_handler.STEP_BATCH_IDS_NO_BATCHES_TO_PUSH, steps)
 
 	def test_item_code_source_enqueues_sku_consolidated_payload(self):
-		"""picker_identifier_source = 'Item Code' -> one entry per SKU with [item_code]."""
+		"""picker_identifier_source = 'Item Code' -> one entry per SKU with [item_code]; comments carry ERP batch truth."""
 		doc = _pl(locations=[
-			_row("SO-001", item_code="JTD011", batch_no="B-001"),
-			_row("SO-001", item_code="JTD011", batch_no="B-002"),  # 2nd batch still collapses to one SKU
+			_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
+			_row("SO-001", item_code="JTD011", batch_no="B-002", qty=2),
 		])
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Code")),
@@ -271,14 +272,14 @@ class TestAfterPickListInsert(FrappeTestCase):
 		mock_enqueue.assert_called_once()
 		self.assertEqual(
 			mock_enqueue.call_args.kwargs["products_data"],
-			[{"item_code": "JTD011", "batch_ids": ["JTD011"]}],
+			[{"item_code": "JTD011", "batch_ids": ["JTD011"], "comments": "- B-001: 3\n- B-002: 2"}],
 		)
 
 	def test_item_barcode_source_enqueues_first_barcode_per_sku(self):
-		"""picker_identifier_source = 'Item Barcode' -> first Item Barcode row's value, one per SKU."""
+		"""picker_identifier_source = 'Item Barcode' -> first Item Barcode row's value, one per SKU; comments still carry batches."""
 		doc = _pl(locations=[
-			_row("SO-001", item_code="JTD011", batch_no="B-001"),
-			_row("SO-001", item_code="JTD011", batch_no="B-002"),
+			_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
+			_row("SO-001", item_code="JTD011", batch_no="B-002", qty=2),
 		])
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Barcode")),
@@ -292,14 +293,14 @@ class TestAfterPickListInsert(FrappeTestCase):
 		mock_enqueue.assert_called_once()
 		self.assertEqual(
 			mock_enqueue.call_args.kwargs["products_data"],
-			[{"item_code": "JTD011", "batch_ids": ["5901234123457"]}],
+			[{"item_code": "JTD011", "batch_ids": ["5901234123457"], "comments": "- B-001: 3\n- B-002: 2"}],
 		)
 
 	def test_item_barcode_source_missing_barcode_logs_error_and_skips(self):
 		"""picker_identifier_source = 'Item Barcode' + Item has no barcode -> Error row, SKU dropped, others still push."""
 		doc = _pl(locations=[
-			_row("SO-001", item_code="NO-BARCODE", batch_no="B-001"),
-			_row("SO-001", item_code="JTD011", batch_no="B-002"),
+			_row("SO-001", item_code="NO-BARCODE", batch_no="B-001", qty=1),
+			_row("SO-001", item_code="JTD011", batch_no="B-002", qty=4),
 		])
 
 		def _barcode_lookup(*args, **kwargs):
@@ -322,7 +323,7 @@ class TestAfterPickListInsert(FrappeTestCase):
 		mock_enqueue.assert_called_once()
 		self.assertEqual(
 			mock_enqueue.call_args.kwargs["products_data"],
-			[{"item_code": "JTD011", "batch_ids": ["5901234123457"]}],
+			[{"item_code": "JTD011", "batch_ids": ["5901234123457"], "comments": "- B-002: 4"}],
 		)
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pl_handler.STEP_BATCH_IDS_IDENTIFIER_FAILED, steps)
