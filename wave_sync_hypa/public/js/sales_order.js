@@ -19,16 +19,19 @@ frappe.ui.form.on("Sales Order", {
 		if (!frm.is_new() && frm.doc.wave_order_id) {
 			_add_resync_status_button(frm);
 		}
-		// "Push to Wave" surfaces only for ERP-side orders that haven't been
-		// pushed yet. Submitted-only so an operator can't push a draft they
-		// might still be editing. Wave-webhook-originated SOs are excluded
-		// regardless of wave_order_id state (they're Wave's order already).
+		// "Push to Wave" / "Send Order to Wave" surfaces only for ERP-side
+		// orders that haven't been pushed yet. Submitted-only so an operator
+		// can't push a draft they might still be editing. Wave-webhook-originated
+		// SOs are excluded regardless of wave_order_id state (they're Wave's
+		// order already). The button label flips to "Send Order to Wave" when
+		// a prior push failed (wave_push_failure_required_review=1) so the
+		// operator clearly understands they're retrying after a fix.
 		if (
 			is_submitted
 			&& !frm.doc.wave_order_id
 			&& frm.doc.wave_origin !== "Wave Webhook"
 		) {
-			_add_push_to_wave_button(frm);
+			_add_push_to_wave_button(frm, frm.doc.wave_push_failure_required_review);
 		}
 	},
 });
@@ -127,31 +130,36 @@ function _call_resync_status_endpoint(frm) {
 function _render_push_failure_banner(frm) {
 	frm.set_intro(
 		__(
-			"Wave Sync — ERP → Wave push failed. See the Comments section below for the specific reason and remediation. After fixing, click 'Push to Wave' again to retry."
+			"Wave Sync — ERP → Wave push failed. See the Comments section below for the specific reason and remediation. After fixing, click 'Send Order to Wave' above to retry."
 		),
 		"red"
 	);
 }
 
-// "Push to Wave" — operator-triggered offline-order push. Visible only on
-// submitted, ERP-side SOs that haven't been pushed yet. Server-side checks
-// the kill-switch + customer + product mappings; failures surface via banner
-// + Comment + ToDo (never a hard JS error).
-function _add_push_to_wave_button(frm) {
+// "Push to Wave" / "Send Order to Wave" — operator-triggered offline-order
+// push. Visible only on submitted, ERP-side SOs that haven't been pushed yet.
+// Server-side checks the kill-switch + customer + product mappings; failures
+// surface via banner + Comment + ToDo (never a hard JS error). Label flips
+// to "Send Order to Wave" on retry so operators know they're acting after
+// a prior failure.
+function _add_push_to_wave_button(frm, is_retry) {
+	const label = is_retry ? __("Send Order to Wave") : __("Push to Wave");
 	frm.add_custom_button(
-		__("Push to Wave"),
-		() => _confirm_push_to_wave(frm),
+		label,
+		() => _confirm_push_to_wave(frm, is_retry),
 		__("Wave")
 	);
 }
 
-function _confirm_push_to_wave(frm) {
-	frappe.confirm(
-		__(
-			"Push this Sales Order to Wave? This creates a corresponding order in Wave's catalog so the picker app can fulfil it. Idempotent — safe to retry on failure."
-		),
-		() => _call_push_to_wave_endpoint(frm)
-	);
+function _confirm_push_to_wave(frm, is_retry) {
+	const prompt = is_retry
+		? __(
+				"Retry pushing this Sales Order to Wave? Make sure the issue listed in the Comments has been fixed. Idempotent — safe to keep retrying."
+			)
+		: __(
+				"Push this Sales Order to Wave? This creates a corresponding order in Wave's catalog so the picker app can fulfil it. Idempotent — safe to retry on failure."
+			);
+	frappe.confirm(prompt, () => _call_push_to_wave_endpoint(frm));
 }
 
 function _call_push_to_wave_endpoint(frm) {
