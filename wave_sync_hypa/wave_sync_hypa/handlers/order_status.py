@@ -25,7 +25,16 @@ STEP_SKIPPED_NO_WAVE_ID = "order_status_push_skipped_no_wave_order_id"
 STEP_SKIPPED_NO_RULE = "order_status_push_skipped_no_matching_rule"
 STEP_ENQUEUE_FAILED = "order_status_push_enqueue_failed"
 
+STEP_AUTO_PUSH_ENQUEUED = "erp_to_wave_auto_push_enqueued"
+STEP_AUTO_PUSH_SKIPPED_DISABLED = "erp_to_wave_auto_push_skipped_disabled"
+STEP_AUTO_PUSH_SKIPPED_ALREADY_PUSHED = "erp_to_wave_auto_push_skipped_already_pushed"
+STEP_AUTO_PUSH_SKIPPED_WAVE_ORIGIN = "erp_to_wave_auto_push_skipped_wave_origin"
+STEP_AUTO_PUSH_ENQUEUE_FAILED = "erp_to_wave_auto_push_enqueue_failed"
+
 WORKER_DOTTED_PATH = "wave_sync_hypa.wave_sync_hypa.services.order_status_pusher.push_order_status"
+WAVE_ORDER_CREATOR_DOTTED_PATH = (
+	"wave_sync_hypa.wave_sync_hypa.services.wave_order_creator.push_so_to_wave"
+)
 
 
 def on_sales_order_submit(doc, method=None) -> None:
@@ -36,6 +45,83 @@ def on_sales_order_submit(doc, method=None) -> None:
 def on_sales_order_cancel(doc, method=None) -> None:
 	"""Sales Order.on_cancel doc_event: enqueue a Wave status PUT if rules match."""
 	_dispatch(doc, "cancel")
+
+
+def maybe_auto_push_to_wave(doc, method=None) -> None:
+	"""Sales Order.on_submit doc_event: auto-fire the ERP -> Wave push for offline SOs.
+
+	Wired alongside `on_sales_order_submit` so workflow approvals (which call
+	doc.submit() under the hood) automatically push the order to Wave —
+	operators don't have to remember to click the manual button after every
+	approval. The button stays available for retries after failure.
+
+	Three guards keep this safe and idempotent:
+
+	  * `erp_to_wave_push_enabled` off  -> skip (operator hasn't enabled the channel)
+	  * `wave_order_id` already set      -> skip (already pushed; never double-push)
+	  * `wave_origin == 'Wave Webhook'` -> skip (Wave-originated; pushing back is wrong)
+
+	The actual push goes through a worker (`enqueue_after_commit=True`) so
+	submit returns fast and the heavy HTTP traffic doesn't block the
+	approval action. Failures surface via the existing banner + Comment +
+	ToDo + Wave Sync Log path inside `push_so_to_wave`; the manual button
+	is the retry surface once the failure is fixed.
+	"""
+	settings = frappe.get_cached_doc("Wave Settings")
+	if not settings.get("erp_to_wave_push_enabled"):
+		_log_auto_push(STEP_AUTO_PUSH_SKIPPED_DISABLED, "Info", doc, "ERP -> Wave push is disabled in Wave Settings.")
+		return
+	if (doc.get("wave_order_id") or "").strip():
+		_log_auto_push(STEP_AUTO_PUSH_SKIPPED_ALREADY_PUSHED, "Info", doc, f"Sales Order is already linked to Wave order {doc.wave_order_id}.")
+		return
+	if (doc.get("wave_origin") or "") == "Wave Webhook":
+		_log_auto_push(STEP_AUTO_PUSH_SKIPPED_WAVE_ORIGIN, "Info", doc, "Sales Order originated from a Wave webhook; nothing to push.")
+		return
+
+	correlation_id = new_correlation_id()
+	try:
+		frappe.enqueue(
+			WAVE_ORDER_CREATOR_DOTTED_PATH,
+			queue="default",
+			enqueue_after_commit=True,
+			job_name=f"erp_to_wave_push:{doc.name}",
+			so_name=doc.name,
+			correlation_id=correlation_id,
+		)
+	except Exception as exc:
+		log_step(
+			correlation_id=correlation_id,
+			step=STEP_AUTO_PUSH_ENQUEUE_FAILED,
+			level="Error",
+			doc_type=doc.doctype,
+			linked_doctype=doc.doctype,
+			linked_docname=doc.name,
+			error_message=f"failed to enqueue ERP -> Wave auto-push: {exc}",
+			stack_trace=frappe.get_traceback(),
+		)
+		return
+
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_AUTO_PUSH_ENQUEUED,
+		level="Info",
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name,
+	)
+
+
+def _log_auto_push(step: str, level: str, doc, message: str) -> None:
+	"""One-line audit row for auto-push pre-flight short-circuits (no enqueue happened)."""
+	log_step(
+		correlation_id=new_correlation_id(),
+		step=step,
+		level=level,
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name,
+		error_message=message,
+	)
 
 
 def _dispatch(doc, event: str) -> None:
