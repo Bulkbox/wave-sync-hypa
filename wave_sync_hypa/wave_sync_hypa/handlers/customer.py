@@ -22,6 +22,26 @@ def handle(payload: dict, correlation_id: str) -> None:
 	wave_id = payload.get("_id")
 	wave_updated_at = payload.get("updatedAt")
 
+	# Short-circuit: CUSTOMER.UPDATE for the configured Common Offline Customer
+	# has no ERP-side mapping by design. That customer is a Wave-only placeholder
+	# used as the fallback assignee for ERP-pushed offline orders; mirroring its
+	# webhook updates into ERP would create / mutate a Customer doc we never want
+	# to exist. Log + return before any resolver runs.
+	settings = frappe.get_cached_doc("Wave Settings")
+	common_offline_id = (settings.get("wave_common_offline_customer_id") or "").strip()
+	if common_offline_id and (wave_id or "").strip() == common_offline_id:
+		log_step(
+			correlation_id,
+			"Skipped",
+			"Info",
+			doc_type="CUSTOMER",
+			action="UPDATE",
+			wave_id=wave_id,
+			wave_updated_at=wave_updated_at,
+			response_body={"reason": "common_offline_customer_no_op"},
+		)
+		return
+
 	customer_name, created, source = find_or_create_customer(payload)
 	_log_customer_resolved(correlation_id, payload, customer_name, created, source)
 	if source == "email":

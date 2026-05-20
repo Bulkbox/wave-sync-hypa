@@ -23,6 +23,7 @@
   "wave_api_base_url",
   "wave_app_id",
   "wave_store_id",
+  "wave_shop_id",
   "column_break_outbound",
   "wave_api_key",
   "outbound_stock_sync_enabled",
@@ -32,6 +33,12 @@
   "picker_identifier_source",
   "pick_list_erp_submit_lockdown_enabled",
   "wave_pickup_driver",
+  "erp_to_wave_push_section",
+  "erp_to_wave_push_enabled",
+  "wave_common_offline_customer_id",
+  "wave_default_offline_payment_type",
+  "column_break_erp_to_wave_push",
+  "wave_push_failure_todo_enabled",
   "erp_defaults_section",
   "default_company",
   "default_warehouse",
@@ -164,6 +171,12 @@
    "label": "Wave Store ID"
   },
   {
+   "description": "Wave's internal mongo _id of the shop, used as `shopId` when pushing ERP-originated orders to Wave's create-order endpoint. Distinct from Wave Store ID above — that's the human-readable storeID (\"1\"); this is the longer hex _id (e.g. 698ef51f728782a10adcef6d). Get it from any Wave order payload's shop._id or from Wave admin.",
+   "fieldname": "wave_shop_id",
+   "fieldtype": "Data",
+   "label": "Wave Shop ID (mongo _id)"
+  },
+  {
    "fieldname": "column_break_outbound",
    "fieldtype": "Column Break"
   },
@@ -223,9 +236,40 @@
    "options": "Driver"
   },
   {
-   "fieldname": "erp_defaults_section",
+   "fieldname": "erp_to_wave_push_section",
    "fieldtype": "Section Break",
-   "label": "ERP Defaults"
+   "label": "ERP → Wave Order Push"
+  },
+  {
+   "default": "0",
+   "description": "When on, operators can push offline-created Sales Orders to Wave via the 'Push to Wave' button on the SO form. Wave creates the order in its catalog so the picker app picks up the workflow. Default off.",
+   "fieldname": "erp_to_wave_push_enabled",
+   "fieldtype": "Check",
+   "label": "ERP → Wave Order Push Enabled"
+  },
+  {
+   "description": "Wave mongo _id of the fallback customer used when the Sales Order's linked ERP Customer has no wave_customer_id stamped. Pushes fail with a notification if this is blank AND the linked Customer has no cached Wave id.",
+   "fieldname": "wave_common_offline_customer_id",
+   "fieldtype": "Data",
+   "label": "Common Offline Customer (Wave _id)"
+  },
+  {
+   "default": "cash",
+   "description": "paymentType sent on every ERP-pushed order. Must match one of Wave's enum values (cash, card, klarna, mobile, thirdPartyReference, cardOnDelivery, bankTransfer, irisOnDelivery).",
+   "fieldname": "wave_default_offline_payment_type",
+   "fieldtype": "Data",
+   "label": "Default Offline Payment Type"
+  },
+  {
+   "fieldname": "column_break_erp_to_wave_push",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "description": "When on, a failed ERP → Wave push also creates a Frappe ToDo for the configured Intake Review Assignee / Role so the issue is escalated to operators. Comment + form banner are always added; only the ToDo is gated by this. Default on.",
+   "fieldname": "wave_push_failure_todo_enabled",
+   "fieldtype": "Check",
+   "label": "Push Failure ToDo Enabled"
   },
   {
    "description": "Company applied to every Sales Order created by this integration.",
