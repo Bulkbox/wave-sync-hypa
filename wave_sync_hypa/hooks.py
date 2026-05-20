@@ -150,7 +150,10 @@ doc_events = {
 	},
 	"Sales Order": {
 		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.sales_order_validation.validate_unique_wave_order_id",
-		"on_submit": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_submit",
+		"on_submit": [
+			"wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_submit",
+			"wave_sync_hypa.wave_sync_hypa.handlers.order_status.maybe_auto_push_to_wave",
+		],
 		"on_cancel": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_cancel",
 	},
 	"Delivery Note": {
