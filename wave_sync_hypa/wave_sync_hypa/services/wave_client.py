@@ -289,6 +289,89 @@ def _build_admin_product_url(base_url: str, product_id: str) -> str:
 	return f"{base_url.rstrip('/')}/api/v3/admin/products/{product_id}"
 
 
+def _build_admin_orders_url(base_url: str) -> str:
+	"""Compose the admin orders collection URL used by POST /api/v3/admin/orders."""
+	return f"{base_url.rstrip('/')}/api/v3/admin/orders"
+
+
+def get_admin_product_by_id(
+	*,
+	base_url: str,
+	api_key: str,
+	app_id: str,
+	product_id: str,
+	timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict | None:
+	"""GET /api/v3/admin/products/{id}; return the full product dict, or None on 404.
+
+	Used by the ERP -> Wave order push to backfill OrderProductV3 fields
+	(name, vat, isWeighed, uom, unitOfMeasurement, categories, etc.) from
+	Wave's authoritative catalog. Returning None on 404 lets callers
+	distinguish "Wave deleted this product since we cached it" (stale
+	wave_product_id) from real HTTP failures.
+	"""
+	if not base_url:
+		raise WaveOutboundError("Wave API base URL is not configured.")
+	if not api_key:
+		raise WaveOutboundError("Wave API key is not configured.")
+	if not app_id:
+		raise WaveOutboundError("Wave App ID is not configured.")
+	if not product_id:
+		raise WaveOutboundError("product_id is required.")
+
+	url = _build_admin_product_url(base_url, product_id)
+	headers = _build_headers(api_key, app_id)
+
+	try:
+		response = requests.get(url, headers=headers, timeout=timeout)
+	except requests.RequestException as exc:
+		raise WaveOutboundError(f"network error calling Wave admin/products GET: {exc}") from exc
+
+	if response.status_code == 404:
+		return None
+	_raise_for_response(response, "admin/products GET")
+	return _parse_json(response)
+
+
+def create_admin_order(
+	*,
+	base_url: str,
+	api_key: str,
+	app_id: str,
+	body: dict,
+	skip_webhook_notification: bool = True,
+	timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+	"""POST /api/v3/admin/orders to create a new Wave-side order from the integrator.
+
+	`skip_webhook_notification` defaults to True so the ERP-pushed order
+	doesn't fire an ORDER.CREATE webhook back at us — the inbound handler
+	would dedup by wave_order_id anyway, but suppressing the round-trip
+	keeps the audit trail clean. Caller stamps the response's _id +
+	friendlyId on the source SO.
+	"""
+	if not base_url:
+		raise WaveOutboundError("Wave API base URL is not configured.")
+	if not api_key:
+		raise WaveOutboundError("Wave API key is not configured.")
+	if not app_id:
+		raise WaveOutboundError("Wave App ID is not configured.")
+	if not isinstance(body, dict) or not body:
+		raise WaveOutboundError("admin/orders POST body must be a non-empty dict.")
+
+	url = _build_admin_orders_url(base_url)
+	headers = _build_headers(api_key, app_id)
+	params = {"skipWebhookNotification": "true" if skip_webhook_notification else "false"}
+
+	try:
+		response = requests.post(url, json=body, params=params, headers=headers, timeout=timeout)
+	except requests.RequestException as exc:
+		raise WaveOutboundError(f"network error calling Wave admin/orders POST: {exc}") from exc
+
+	_raise_for_response(response, "admin/orders POST")
+	return _parse_json(response)
+
+
 def _build_stock_sync_url(base_url: str, product_id: str) -> str:
 	"""Compose the per-product stock-sync URL, normalising trailing slashes on the base."""
 	return f"{base_url.rstrip('/')}/api/v3/admin/products/{product_id}/stock/sync"
