@@ -142,6 +142,40 @@ def post_order_status(
 	return _parse_json(response)
 
 
+def reject_admin_order(
+	*,
+	base_url: str,
+	api_key: str,
+	app_id: str,
+	order_id: str,
+	timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+	"""POST /api/v3.1/admin/orders/{order_id}/reject.
+
+	The cancel path for both ERP-pushed AND Wave-originated orders. Authorized
+	for admin tokens; refuses prepaid orders with ORDER0005 (matches Wave UI).
+	Returns the full order body on 200 (cancelType="MERCHANT").
+	"""
+	if not base_url:
+		raise WaveOutboundError("Wave API base URL is not configured.")
+	if not api_key:
+		raise WaveOutboundError("Wave API key is not configured.")
+	if not app_id:
+		raise WaveOutboundError("Wave App ID is not configured.")
+	if not order_id:
+		raise WaveOutboundError("order_id is required.")
+
+	url = f"{base_url.rstrip('/')}/api/v3.1/admin/orders/{order_id}/reject"
+	headers = _build_status_headers(api_key, app_id)
+	try:
+		response = requests.post(url, headers=headers, timeout=timeout)
+	except requests.RequestException as exc:
+		raise WaveOutboundError(f"network error calling Wave admin reject: {exc}") from exc
+
+	_raise_for_response(response, "admin reject")
+	return _parse_json(response)
+
+
 def patch_order_products(
 	*,
 	base_url: str,

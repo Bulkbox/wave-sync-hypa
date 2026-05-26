@@ -54,13 +54,28 @@ STEP_WORKER_STARTED = "order_status_push_worker_started"
 # out without losing the audit trail.
 WAVE_TERMINAL_TRANSITION_CODES = frozenset(
 	{
-		"ORDER0034",  # "You are not authorized to access this order" — typically returned
-		# when the order has already been finalised on Wave's side and our app_id
-		# can no longer mutate it (e.g. push CANCELLED on an already-cancelled order).
-		"ORDER0049",  # "You cannot change the order status to the desired status" — Wave
-		# rejects the requested transition because the current state forbids it
-		# (e.g. push ACCEPTED on an order Wave already moved to UNDER_PICKING).
+		# ORDER0049: "You cannot change the order status to the desired status" —
+		# Wave rejects the transition because the current state forbids it (e.g.
+		# push ACCEPTED on an order Wave already moved to UNDER_PICKING).
+		# ORDER0034 used to be in this set on the assumption it meant "already
+		# finalised", but live tracing on dev showed it's actually a real auth
+		# failure ("you are not authorized to access this order") and the v3.1
+		# admin/reject path never returns it. Surfacing as Error now.
+		"ORDER0049",
 	}
+)
+
+STEP_PUSH_CANCEL_REFUSED_PREPAID = "order_status_push_cancel_refused_prepaid"
+STEP_CANCEL_CLEARED_BANNERS = "order_status_cancel_cleared_banners"
+
+# On a confirmed SO cancel, silence the red banner flags. Everything else
+# (wave_order_id, friendly_id, status, correlation_id, payment_*, ...) stays
+# on the cancelled SO as an audit breadcrumb. Amend's fresh-Wave-order
+# behaviour is guaranteed by no_copy=1 on every wave_* custom field, NOT by
+# this clear pass.
+_BANNER_FIELDS_TO_CLEAR_ON_CANCEL = (
+	"wave_manual_review_required",
+	"wave_push_failure_required_review",
 )
 
 
@@ -201,6 +216,17 @@ def _push_inner(
 		)
 		return
 
+	# Sales Order cancel routes through Wave's v3.1 admin/reject endpoint
+	# (the only path authorized for our admin token on Wave-originated orders).
+	# Other status transitions and other doctypes' cancels still use v3 status.
+	if (
+		source_doctype == "Sales Order"
+		and erp_event == "cancel"
+		and (status_name or "").upper() == "CANCELLED"
+	):
+		_post_cancel_via_reject(source_doctype, source_docname, erp_event, correlation_id, wave_order_id, config)
+		return
+
 	_post_status(source_doctype, source_docname, erp_event, correlation_id, wave_order_id, config, status_name)
 
 
@@ -242,12 +268,18 @@ def _post_status(
 		)
 	except WaveOutboundError as exc:
 		# Wave rejected the transition. Two flavours:
-		#   - Terminal-state codes (ORDER0034 / ORDER0049): the order is already
-		#     past where we were trying to take it. Not a bug; log Warning +
-		#     STEP_PUSH_SKIPPED_TERMINAL so audit dashboards stop alerting on
-		#     amend / re-cancel noise.
+		#   - ORDER0049 "you cannot change the order status to the desired
+		#     status": Wave's state machine refuses the transition because
+		#     the order is already past it (e.g. amend re-pushes ACCEPTED on
+		#     an already-UNDER_PICKING order). Not a bug; log Warning +
+		#     STEP_PUSH_SKIPPED_TERMINAL so dashboards aren't pinged by
+		#     routine amend / re-cancel noise.
 		#   - Anything else (auth, 5xx, network, unknown 422): real failure,
-		#     log Error + STEP_PUSH_FAILED so the team sees it.
+		#     log Error + STEP_PUSH_FAILED so the team sees it. ORDER0034
+		#     "you are not authorized to access this order" used to be in
+		#     the terminal set under the assumption it meant "already
+		#     finalised"; live tracing on dev showed it's a real auth
+		#     failure and now surfaces as Error.
 		is_terminal = exc.wave_code in WAVE_TERMINAL_TRANSITION_CODES
 		log_step(
 			correlation_id=correlation_id,
@@ -275,6 +307,117 @@ def _post_status(
 		wave_id=wave_order_id,
 		request_body={"path": url_path, "status_name": status_name},
 		response_body=response,
+	)
+
+
+def _post_cancel_via_reject(
+	source_doctype: str,
+	source_docname: str,
+	erp_event: str,
+	correlation_id: str,
+	wave_order_id: str,
+	config: dict,
+) -> None:
+	"""POST /api/v3.1/admin/orders/{id}/reject. On 200, clear ERP wave fields."""
+	url_path = f"/api/v3.1/admin/orders/{wave_order_id}/reject"
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_PUSH_ATTEMPT,
+		level="Info",
+		doc_type=source_doctype,
+		action=erp_event,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
+		wave_id=wave_order_id,
+		request_body={"method": "POST", "path": url_path, "order_id": wave_order_id},
+	)
+	try:
+		response = wave_client.reject_admin_order(
+			base_url=config["base_url"],
+			api_key=config["api_key"],
+			app_id=config["app_id"],
+			order_id=wave_order_id,
+		)
+	except WaveOutboundError as exc:
+		# ORDER0005 "the order cannot be cancelled" — Wave business rule
+		# (prepaid orders). Real refusal: do NOT clear banners, the link is
+		# still live on Wave and the operator needs to reconcile manually.
+		#
+		# ORDER0049 state-machine refusal — Wave reports the order is
+		# already terminal. From ERP's perspective the cancel intent has
+		# effectively been achieved (the order on Wave is already gone),
+		# so we DO clear the banner flags as if it were a 200.
+		is_prepaid_refusal = exc.wave_code == "ORDER0005"
+		is_terminal = exc.wave_code in WAVE_TERMINAL_TRANSITION_CODES
+		if is_prepaid_refusal:
+			step, level = STEP_PUSH_CANCEL_REFUSED_PREPAID, "Warning"
+		elif is_terminal:
+			step, level = STEP_PUSH_SKIPPED_TERMINAL, "Warning"
+		else:
+			step, level = STEP_PUSH_FAILED, "Error"
+		log_step(
+			correlation_id=correlation_id,
+			step=step,
+			level=level,
+			doc_type=source_doctype,
+			action=erp_event,
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
+			wave_id=wave_order_id,
+			request_body={"path": url_path},
+			error_message=str(exc),
+			stack_trace=None if (is_prepaid_refusal or is_terminal) else frappe.get_traceback(),
+		)
+		if is_terminal and not is_prepaid_refusal:
+			_clear_so_banner_flags_on_cancel(source_docname, correlation_id, wave_order_id)
+		return
+
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_PUSH_SUCCESS,
+		level="Success",
+		doc_type=source_doctype,
+		action=erp_event,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
+		wave_id=wave_order_id,
+		request_body={"path": url_path},
+		response_body={
+			"_id": response.get("_id"),
+			"friendlyId": response.get("friendlyId"),
+			"cancelType": response.get("cancelType"),
+		},
+	)
+	_clear_so_banner_flags_on_cancel(source_docname, correlation_id, wave_order_id)
+
+
+def _clear_so_banner_flags_on_cancel(
+	so_name: str,
+	correlation_id: str,
+	wave_order_id: str,
+) -> None:
+	"""Zero the two Check banner flags on the cancelled SO in a single UPDATE.
+
+	A cancelled SO should not display the red 'manual review' / 'push failure'
+	banners. Every other wave_* field stays for audit; amend safety is handled
+	by no_copy=1 on the custom field definitions.
+	"""
+	frappe.db.set_value(
+		"Sales Order",
+		so_name,
+		{field: 0 for field in _BANNER_FIELDS_TO_CLEAR_ON_CANCEL},
+		update_modified=False,
+	)
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_CANCEL_CLEARED_BANNERS,
+		level="Info",
+		doc_type="Sales Order",
+		action="cancel",
+		linked_doctype="Sales Order",
+		linked_docname=so_name,
+		wave_id=wave_order_id,
+		response_body={"cleared_fields": list(_BANNER_FIELDS_TO_CLEAR_ON_CANCEL)},
 	)
 
 

@@ -177,7 +177,7 @@
   "translatable": 0
  },
  {
-  "description": "Derived at intake from payload.fees: 'Delivery' when any SHIPPING_COST fee has a positive amount, else 'Pickup'. Read by the Delivery Note autopopulate hook to decide whether to stamp the configured Wave Pickup Driver on a new DN. Blank values are treated as Delivery (no auto-driver-stamp).",
+  "description": "Derived at intake from Wave's deliveryService field: 'takeAway' -> Pickup, any other non-empty value (standard, express, ...) -> Delivery. Falls back to address.street presence for legacy payloads. Read by the Delivery Note autopopulate hook to decide whether to stamp the configured Wave Pickup Driver on a new DN.",
   "doctype": "Custom Field",
   "dt": "Sales Order",
   "fieldname": "wave_delivery_type",
