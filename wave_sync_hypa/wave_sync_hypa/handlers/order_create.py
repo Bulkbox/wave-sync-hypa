@@ -202,25 +202,22 @@ def _build_sales_order_header(
 
 
 def _classify_delivery_type(payload: dict) -> str:
-	"""Return 'Delivery' when any SHIPPING_COST fee has a positive amount, else 'Pickup'.
+	"""Classify the order using Wave's `deliveryService` field.
 
-	Wave's ORDER.CREATE payload carries no explicit deliveryType field; we
-	infer from whether the order was charged a shipping fee. This is stamped
-	on the SO at intake (wave_delivery_type) so the Delivery Note autopopulate
-	hook can decide whether to stamp the configured Wave Pickup Driver
-	without re-parsing the original payload at DN-create time.
-
-	A delivery-promo order that zeroes shipping cost would misclassify as
-	Pickup — accepted edge case; flagged in the feature ticket.
+	`takeAway` -> Pickup. Any other non-empty service (`standard`, `express`, ...)
+	-> Delivery. When `deliveryService` is absent (legacy payloads), fall back to
+	presence of a real `address.street`. The earlier SHIPPING_COST signal mis-
+	classified free-shipping promos and Wave payloads that omit the fee row
+	entirely (observed on friendly 10000091 / 10000092 on dev).
 	"""
-	for fee in payload.get("fees") or []:
-		if (fee.get("type") or "").strip().upper() != "SHIPPING_COST":
-			continue
-		try:
-			if float(fee.get("amount") or 0) > 0:
-				return "Delivery"
-		except (TypeError, ValueError):
-			continue
+	service = (payload.get("deliveryService") or "").strip().lower()
+	if service == "takeaway":
+		return "Pickup"
+	if service:
+		return "Delivery"
+	address = payload.get("address") or {}
+	if isinstance(address, dict) and (address.get("street") or "").strip():
+		return "Delivery"
 	return "Pickup"
 
 

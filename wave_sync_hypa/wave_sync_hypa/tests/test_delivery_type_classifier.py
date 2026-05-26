@@ -1,9 +1,8 @@
-"""Unit tests for the SHIPPING_COST-based delivery/pickup classifier at intake.
+"""Unit tests for the delivery/pickup classifier at intake.
 
-`_classify_delivery_type` inspects payload.fees and returns 'Delivery' when any
-SHIPPING_COST fee carries a positive amount, else 'Pickup'. The value is
-stamped on the SO at intake (wave_delivery_type) and read later by the
-Delivery Note autopopulate hook.
+`_classify_delivery_type` reads Wave's `deliveryService` field — `takeAway`
+means pickup, any other non-empty value means delivery. When that field is
+missing (legacy payloads) it falls back to address.street presence.
 """
 
 from __future__ import annotations
@@ -14,44 +13,35 @@ from wave_sync_hypa.wave_sync_hypa.handlers.order_create import _classify_delive
 
 
 class TestClassifyDeliveryType(FrappeTestCase):
-	"""Six branches: positive shipping / zero shipping / no shipping / other fees / typed-amount / null amount."""
+	"""deliveryService primary signal; address.street fallback."""
 
-	def test_positive_shipping_cost_classifies_as_delivery(self):
-		payload = {"fees": [{"type": "SHIPPING_COST", "amount": 20000}]}
+	def test_take_away_classifies_as_pickup(self):
+		self.assertEqual(_classify_delivery_type({"deliveryService": "takeAway"}), "Pickup")
+
+	def test_take_away_case_insensitive(self):
+		self.assertEqual(_classify_delivery_type({"deliveryService": "TAKEAWAY"}), "Pickup")
+		self.assertEqual(_classify_delivery_type({"deliveryService": "takeaway"}), "Pickup")
+
+	def test_standard_classifies_as_delivery(self):
+		self.assertEqual(_classify_delivery_type({"deliveryService": "standard"}), "Delivery")
+
+	def test_express_classifies_as_delivery(self):
+		self.assertEqual(_classify_delivery_type({"deliveryService": "express"}), "Delivery")
+
+	def test_unknown_non_takeaway_service_classifies_as_delivery(self):
+		"""Any non-empty, non-takeAway value is delivery — Wave may add new services."""
+		self.assertEqual(_classify_delivery_type({"deliveryService": "scheduled"}), "Delivery")
+
+	def test_missing_service_with_address_falls_back_to_delivery(self):
+		payload = {"address": {"street": "Muthithi Road", "streetNo": "0010"}}
 		self.assertEqual(_classify_delivery_type(payload), "Delivery")
 
-	def test_zero_shipping_cost_classifies_as_pickup(self):
-		payload = {"fees": [{"type": "SHIPPING_COST", "amount": 0}]}
-		self.assertEqual(_classify_delivery_type(payload), "Pickup")
-
-	def test_no_shipping_cost_fee_classifies_as_pickup(self):
-		payload = {"fees": [{"type": "PLASTIC_BAGS", "amount": 500}]}
-		self.assertEqual(_classify_delivery_type(payload), "Pickup")
-
-	def test_empty_fees_classifies_as_pickup(self):
-		self.assertEqual(_classify_delivery_type({"fees": []}), "Pickup")
+	def test_missing_service_without_address_falls_back_to_pickup(self):
 		self.assertEqual(_classify_delivery_type({}), "Pickup")
+		self.assertEqual(_classify_delivery_type({"address": {}}), "Pickup")
+		self.assertEqual(_classify_delivery_type({"address": None}), "Pickup")
 
-	def test_string_amount_is_coerced_to_float(self):
-		payload = {"fees": [{"type": "SHIPPING_COST", "amount": "20000"}]}
-		self.assertEqual(_classify_delivery_type(payload), "Delivery")
-
-	def test_null_or_malformed_amount_treated_as_zero(self):
-		for bad in (None, "not-a-number", []):
-			payload = {"fees": [{"type": "SHIPPING_COST", "amount": bad}]}
-			self.assertEqual(_classify_delivery_type(payload), "Pickup", f"amount={bad!r}")
-
-	def test_multiple_shipping_costs_one_positive_is_delivery(self):
-		payload = {
-			"fees": [
-				{"type": "SHIPPING_COST", "amount": 0},
-				{"type": "PLASTIC_BAGS", "amount": 100},
-				{"type": "SHIPPING_COST", "amount": 15000},
-			],
-		}
-		self.assertEqual(_classify_delivery_type(payload), "Delivery")
-
-	def test_case_insensitive_fee_type_match(self):
-		"""Defensive: Wave hasn't been known to deviate from upper-case, but match anyway."""
-		payload = {"fees": [{"type": "shipping_cost", "amount": 10000}]}
-		self.assertEqual(_classify_delivery_type(payload), "Delivery")
+	def test_empty_service_with_blank_address_street_is_pickup(self):
+		"""Address present but no street -> pickup (e.g. dropoff metadata only)."""
+		payload = {"deliveryService": "", "address": {"street": ""}}
+		self.assertEqual(_classify_delivery_type(payload), "Pickup")

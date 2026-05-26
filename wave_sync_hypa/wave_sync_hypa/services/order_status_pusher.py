@@ -54,13 +54,41 @@ STEP_WORKER_STARTED = "order_status_push_worker_started"
 # out without losing the audit trail.
 WAVE_TERMINAL_TRANSITION_CODES = frozenset(
 	{
-		"ORDER0034",  # "You are not authorized to access this order" — typically returned
-		# when the order has already been finalised on Wave's side and our app_id
-		# can no longer mutate it (e.g. push CANCELLED on an already-cancelled order).
-		"ORDER0049",  # "You cannot change the order status to the desired status" — Wave
-		# rejects the requested transition because the current state forbids it
-		# (e.g. push ACCEPTED on an order Wave already moved to UNDER_PICKING).
+		# ORDER0049: "You cannot change the order status to the desired status" —
+		# Wave rejects the transition because the current state forbids it (e.g.
+		# push ACCEPTED on an order Wave already moved to UNDER_PICKING).
+		# ORDER0034 used to be in this set on the assumption it meant "already
+		# finalised", but live tracing on dev showed it's actually a real auth
+		# failure ("you are not authorized to access this order") and the v3.1
+		# admin/reject path never returns it. Surfacing as Error now.
+		"ORDER0049",
 	}
+)
+
+STEP_PUSH_CANCEL_REFUSED_PREPAID = "order_status_push_cancel_refused_prepaid"
+STEP_CANCEL_CLEARED_WAVE_FIELDS = "order_status_cancel_cleared_wave_fields"
+
+# Wave fields to clear on a confirmed SO cancel. po_no is handled separately —
+# we only clear it when it equals the friendly id we stamped, so an
+# operator-set paper PO is preserved.
+_WAVE_FIELDS_TO_CLEAR_ON_CANCEL = (
+	"wave_order_id",
+	"wave_friendly_id",
+	"wave_status",
+	"wave_correlation_id",
+	"wave_origin",
+	"wave_push_failure_required_review",
+	"wave_delivery_type",
+	"wave_payment_classification",
+	"wave_payment_state",
+	"wave_payment_type",
+	"wave_payment_status",
+	"wave_payment_gateway",
+	"wave_payment_reference",
+	"wave_payment_hold",
+	"wave_additional_payment_hold",
+	"wave_comments",
+	"wave_manual_review_required",
 )
 
 
@@ -201,6 +229,17 @@ def _push_inner(
 		)
 		return
 
+	# Sales Order cancel routes through Wave's v3.1 admin/reject endpoint
+	# (the only path authorized for our admin token on Wave-originated orders).
+	# Other status transitions and other doctypes' cancels still use v3 status.
+	if (
+		source_doctype == "Sales Order"
+		and erp_event == "cancel"
+		and (status_name or "").upper() == "CANCELLED"
+	):
+		_post_cancel_via_reject(source_doctype, source_docname, erp_event, correlation_id, wave_order_id, config)
+		return
+
 	_post_status(source_doctype, source_docname, erp_event, correlation_id, wave_order_id, config, status_name)
 
 
@@ -275,6 +314,116 @@ def _post_status(
 		wave_id=wave_order_id,
 		request_body={"path": url_path, "status_name": status_name},
 		response_body=response,
+	)
+
+
+def _post_cancel_via_reject(
+	source_doctype: str,
+	source_docname: str,
+	erp_event: str,
+	correlation_id: str,
+	wave_order_id: str,
+	config: dict,
+) -> None:
+	"""POST /api/v3.1/admin/orders/{id}/reject. On 200, clear ERP wave fields."""
+	url_path = f"/api/v3.1/admin/orders/{wave_order_id}/reject"
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_PUSH_ATTEMPT,
+		level="Info",
+		doc_type=source_doctype,
+		action=erp_event,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
+		wave_id=wave_order_id,
+		request_body={"method": "POST", "path": url_path, "order_id": wave_order_id},
+	)
+	try:
+		response = wave_client.reject_admin_order(
+			base_url=config["base_url"],
+			api_key=config["api_key"],
+			app_id=config["app_id"],
+			order_id=wave_order_id,
+		)
+	except WaveOutboundError as exc:
+		# ORDER0005 = "The order cannot be cancelled" — Wave business rule
+		# (prepaid orders). Surface as Warning; do NOT clear ERP fields, the
+		# link is still live on Wave for reconciliation.
+		# ORDER0049 = state-machine refusal (already terminal). Same shape.
+		is_prepaid_refusal = exc.wave_code == "ORDER0005"
+		is_terminal = exc.wave_code in WAVE_TERMINAL_TRANSITION_CODES
+		if is_prepaid_refusal:
+			step, level = STEP_PUSH_CANCEL_REFUSED_PREPAID, "Warning"
+		elif is_terminal:
+			step, level = STEP_PUSH_SKIPPED_TERMINAL, "Warning"
+		else:
+			step, level = STEP_PUSH_FAILED, "Error"
+		log_step(
+			correlation_id=correlation_id,
+			step=step,
+			level=level,
+			doc_type=source_doctype,
+			action=erp_event,
+			linked_doctype=source_doctype,
+			linked_docname=source_docname,
+			wave_id=wave_order_id,
+			request_body={"path": url_path},
+			error_message=str(exc),
+			stack_trace=None if (is_prepaid_refusal or is_terminal) else frappe.get_traceback(),
+		)
+		return
+
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_PUSH_SUCCESS,
+		level="Success",
+		doc_type=source_doctype,
+		action=erp_event,
+		linked_doctype=source_doctype,
+		linked_docname=source_docname,
+		wave_id=wave_order_id,
+		request_body={"path": url_path},
+		response_body={
+			"_id": response.get("_id"),
+			"friendlyId": response.get("friendlyId"),
+			"cancelType": response.get("cancelType"),
+		},
+	)
+	_clear_so_wave_link_on_cancel(source_docname, correlation_id, wave_order_id)
+
+
+def _clear_so_wave_link_on_cancel(
+	so_name: str,
+	correlation_id: str,
+	wave_order_id: str,
+) -> None:
+	"""Clear wave_* + po_no (only if it matches wave_friendly_id) on the cancelled SO.
+
+	Uses db_set to bypass the submitted-doc read-only guard. po_no is cleared
+	only when it equals the friendly id we stamped — an operator-set paper PO
+	is preserved.
+	"""
+	current = frappe.db.get_value(
+		"Sales Order", so_name, ("wave_friendly_id", "po_no"), as_dict=True
+	) or {}
+	friendly = (current.get("wave_friendly_id") or "").strip()
+	po_no = (current.get("po_no") or "").strip()
+	for field in _WAVE_FIELDS_TO_CLEAR_ON_CANCEL:
+		frappe.db.set_value("Sales Order", so_name, field, "", update_modified=False)
+	if friendly and po_no == friendly:
+		frappe.db.set_value("Sales Order", so_name, "po_no", "", update_modified=False)
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_CANCEL_CLEARED_WAVE_FIELDS,
+		level="Info",
+		doc_type="Sales Order",
+		linked_doctype="Sales Order",
+		linked_docname=so_name,
+		wave_id=wave_order_id,
+		response_body={
+			"cleared_fields": list(_WAVE_FIELDS_TO_CLEAR_ON_CANCEL),
+			"po_no_cleared": bool(friendly and po_no == friendly),
+		},
 	)
 
 

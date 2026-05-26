@@ -394,11 +394,18 @@ def _submit_pick_list_with_inbound_flag(doc, payload: dict, correlation_id: str)
 	flag for the parent's own check. Both are restored in finally so the
 	bypass never leaks past this call.
 	"""
+	# The webhook session is Guest (allow_guest=True). ERPNext's PickList.before_save
+	# calls get_descendants_of("Warehouse", ...), which routes through frappe.get_list
+	# and consults the session user directly — ignore_permissions flags don't reach
+	# it. Switch the session user to Administrator for the duration of save/submit
+	# so the Warehouse read permission check passes, then restore.
 	previous_inbound = frappe.flags.get("wave_inbound_pick_list_submit")
 	previous_ignore = frappe.flags.get("ignore_permissions")
+	previous_user = frappe.session.user
 	frappe.flags.wave_inbound_pick_list_submit = True
 	frappe.flags.ignore_permissions = True
 	try:
+		frappe.set_user("Administrator")
 		doc.flags.ignore_permissions = True
 		doc.save()
 		doc.submit()
@@ -407,6 +414,7 @@ def _submit_pick_list_with_inbound_flag(doc, payload: dict, correlation_id: str)
 		frappe.db.rollback()
 		_log_submit_failed(doc, payload, correlation_id, exc)
 	finally:
+		frappe.set_user(previous_user)
 		frappe.flags.wave_inbound_pick_list_submit = previous_inbound
 		frappe.flags.ignore_permissions = previous_ignore
 
