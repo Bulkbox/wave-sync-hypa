@@ -610,7 +610,7 @@ class TestCancelViaReject(FrappeTestCase):
 			patch.object(frappe, "get_cached_doc", return_value=settings),
 			patch.object(order_status_pusher.wave_client, "reject_admin_order", return_value={"_id": "x", "friendlyId": "10000099", "cancelType": "MERCHANT"}) as mock_reject,
 			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_post,
-			patch.object(order_status_pusher, "_clear_so_wave_link_on_cancel") as mock_clear,
+			patch.object(order_status_pusher, "_clear_so_banner_flags_on_cancel") as mock_clear,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
 			_push(payload={"status": "CANCELLED"}, event="cancel", correlation_id="corr-cancel-200")
@@ -634,7 +634,7 @@ class TestCancelViaReject(FrappeTestCase):
 				"reject_admin_order",
 				side_effect=WaveOutboundError("HTTP 422", http_status=422, wave_code="ORDER0005"),
 			),
-			patch.object(order_status_pusher, "_clear_so_wave_link_on_cancel") as mock_clear,
+			patch.object(order_status_pusher, "_clear_so_banner_flags_on_cancel") as mock_clear,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
 			_push(payload={"status": "CANCELLED"}, event="cancel", correlation_id="corr-0005")
@@ -643,7 +643,8 @@ class TestCancelViaReject(FrappeTestCase):
 		self.assertEqual(len(warns), 1)
 		self.assertEqual(warns[0].kwargs.get("level"), "Warning")
 
-	def test_so_cancel_order0049_is_terminal_skip_no_clear(self):
+	def test_so_cancel_order0049_is_terminal_skip_and_clears_banners(self):
+		"""ORDER0049 on reject = order already terminal on Wave. ERP intent achieved; clear banners."""
 		settings = _stub_settings()
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
@@ -652,11 +653,11 @@ class TestCancelViaReject(FrappeTestCase):
 				"reject_admin_order",
 				side_effect=WaveOutboundError("HTTP 422", http_status=422, wave_code="ORDER0049"),
 			),
-			patch.object(order_status_pusher, "_clear_so_wave_link_on_cancel") as mock_clear,
+			patch.object(order_status_pusher, "_clear_so_banner_flags_on_cancel") as mock_clear,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
 			_push(payload={"status": "CANCELLED"}, event="cancel", correlation_id="corr-0049-cancel")
-		mock_clear.assert_not_called()
+		mock_clear.assert_called_once_with(DUMMY_SO, "corr-0049-cancel", DUMMY_WAVE_ORDER_ID)
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(order_status_pusher.STEP_PUSH_SKIPPED_TERMINAL, steps)
 
@@ -669,7 +670,7 @@ class TestCancelViaReject(FrappeTestCase):
 				"reject_admin_order",
 				side_effect=WaveOutboundError("HTTP 500", http_status=500, wave_code=None),
 			),
-			patch.object(order_status_pusher, "_clear_so_wave_link_on_cancel") as mock_clear,
+			patch.object(order_status_pusher, "_clear_so_banner_flags_on_cancel") as mock_clear,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
 			_push(payload={"status": "CANCELLED"}, event="cancel", correlation_id="corr-fail")
@@ -691,32 +692,22 @@ class TestCancelViaReject(FrappeTestCase):
 		mock_reject.assert_not_called()
 		mock_post.assert_called_once()
 
-	def test_clear_so_wave_link_writes_blanks_and_logs(self):
-		"""_clear_so_wave_link_on_cancel db_sets every wave_* field to '' and logs the cleared list."""
+	def test_clear_so_banner_flags_writes_zeros_in_single_call_and_logs(self):
+		"""One batched set_value with type-correct 0s for the two Check banner fields, plus a log row tagged with action='cancel'."""
 		with (
-			patch.object(frappe.db, "get_value", return_value={"wave_friendly_id": "10000077", "po_no": "OPERATOR-PO"}),
 			patch.object(frappe.db, "set_value") as mock_set,
 			patch.object(order_status_pusher, "log_step") as mock_log,
 		):
-			order_status_pusher._clear_so_wave_link_on_cancel(DUMMY_SO, "corr-clear", DUMMY_WAVE_ORDER_ID)
-		# Every managed field cleared.
-		cleared = {c.args[2] for c in mock_set.call_args_list if c.args[0] == "Sales Order"}
-		for f in order_status_pusher._WAVE_FIELDS_TO_CLEAR_ON_CANCEL:
-			self.assertIn(f, cleared)
-		# po_no NOT cleared (operator paper PO differs from friendly id).
-		self.assertNotIn("po_no", cleared)
-		# Log row recorded.
-		entries = [c for c in mock_log.call_args_list if c.kwargs.get("step") == order_status_pusher.STEP_CANCEL_CLEARED_WAVE_FIELDS]
+			order_status_pusher._clear_so_banner_flags_on_cancel(DUMMY_SO, "corr-clear", DUMMY_WAVE_ORDER_ID)
+		mock_set.assert_called_once_with(
+			"Sales Order",
+			DUMMY_SO,
+			{"wave_manual_review_required": 0, "wave_push_failure_required_review": 0},
+			update_modified=False,
+		)
+		entries = [
+			c for c in mock_log.call_args_list
+			if c.kwargs.get("step") == order_status_pusher.STEP_CANCEL_CLEARED_BANNERS
+		]
 		self.assertEqual(len(entries), 1)
-
-	def test_clear_so_wave_link_clears_po_no_when_it_matches_friendly(self):
-		"""When po_no == wave_friendly_id, we stamped it and clearing is safe."""
-		with (
-			patch.object(frappe.db, "get_value", return_value={"wave_friendly_id": "10000077", "po_no": "10000077"}),
-			patch.object(frappe.db, "set_value") as mock_set,
-			patch.object(order_status_pusher, "log_step"),
-		):
-			order_status_pusher._clear_so_wave_link_on_cancel(DUMMY_SO, "corr-clear-po", DUMMY_WAVE_ORDER_ID)
-		po_no_calls = [c for c in mock_set.call_args_list if c.args[2] == "po_no"]
-		self.assertEqual(len(po_no_calls), 1)
-		self.assertEqual(po_no_calls[0].args[3], "")
+		self.assertEqual(entries[0].kwargs.get("action"), "cancel")

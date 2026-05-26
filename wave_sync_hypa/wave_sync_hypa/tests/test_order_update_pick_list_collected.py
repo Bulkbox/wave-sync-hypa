@@ -250,6 +250,28 @@ class TestDraftPickList(FrappeTestCase):
 		steps = [c.args[1] for c in mock_log.call_args_list]
 		self.assertIn(ou.STEP_SUBMIT_FAILED, steps)
 
+	def test_save_only_path_failure_logs_save_failed_and_does_not_raise(self):
+		"""REPLACED-SKU path: doc.save() raises → handler catches, logs STEP_SAVE_FAILED, returns cleanly."""
+		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X", qty=2, batch_no="JTD01100016")])
+		pl.save.side_effect = frappe.PermissionError("Warehouse read denied")
+		payload = _payload()
+		payload["picking"]["items"][0]["replacements"] = [
+			{"withProductId": "wp-SUB", "quantity": 1, "pending": False},
+		]
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe, "get_all", return_value=["PICK-X"]),
+			patch.object(frappe, "get_doc", return_value=pl),
+			patch.object(frappe.db, "rollback"),
+			patch.object(frappe, "get_traceback", return_value=""),
+			patch.object(ou, "log_step") as mock_log,
+		):
+			ou.handle(payload, "corr-save-fail")  # must not raise
+		steps = [c.args[1] for c in mock_log.call_args_list]
+		self.assertIn(ou.STEP_SAVE_FAILED, steps)
+		# Flags still get cleared.
+		self.assertFalse(frappe.flags.get("ignore_permissions"))
+
 	def test_global_ignore_permissions_set_during_submit(self):
 		"""ERPNext's Pick List on_submit creates a nested Serial and Batch Bundle whose
 		permission check consults frappe.flags.ignore_permissions. Pin that we set it."""

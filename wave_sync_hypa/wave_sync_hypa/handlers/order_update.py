@@ -24,6 +24,7 @@ field is left untouched so the original-vs-updated history is preserved.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import frappe
@@ -37,6 +38,7 @@ STEP_DISABLED = "pick_list_inbound_submit_disabled"
 STEP_NO_PICK_LIST = "pick_list_inbound_no_pick_list"
 STEP_DRAFT_SUBMITTED = "pick_list_inbound_pick_list_submitted"
 STEP_SUBMIT_FAILED = "pick_list_inbound_submit_failed"
+STEP_SAVE_FAILED = "pick_list_inbound_save_failed"
 STEP_REPLACEMENT_PRESENT = "pick_list_inbound_replacement_present"
 STEP_DISPARITY_PRESENT = "pick_list_inbound_disparity_present"
 STEP_ANNOTATED_SUBMITTED = "pick_list_inbound_annotated_submitted_pl"
@@ -169,12 +171,12 @@ def _process_draft_pick_list(doc, payload: dict, correlation_id: str, index: dic
 
 	if _has_replacements(index):
 		_add_replacement_review_comments(doc, index)
-		_save_without_submit(doc)
+		_save_without_submit(doc, payload, correlation_id)
 		_log_replacement_present(doc, payload, correlation_id, index)
 		return
 
 	if outcome.has_disparity:
-		_save_without_submit(doc)
+		_save_without_submit(doc, payload, correlation_id)
 		_log_disparity_present(doc, payload, correlation_id, outcome.anomalies)
 		return
 
@@ -367,56 +369,64 @@ def _maybe_propagate_customer_comment_to_sales_order(pick_list_doc, payload: dic
 		so.add_comment("Comment", f"Customer now asks: {text}")
 
 
-def _save_without_submit(doc) -> None:
-	"""Persist line + comment edits on a Draft Pick List, bypassing permission checks.
+@contextmanager
+def _as_administrator_with_ignore_permissions():
+	"""Webhook permission bypass: impersonate Administrator + set ignore_permissions.
 
-	Pick List's pre-submit lifecycle can create nested docs (Stock Reservation
-	Entries, etc.) whose permission check consults frappe.flags.ignore_permissions.
-	Set the global flag in addition to the doc-level one and restore in finally.
+	The inbound webhook session is Guest (allow_guest=True). ERPNext's
+	PickList.before_save calls get_descendants_of("Warehouse", ...), which routes
+	through frappe.get_list and consults the session user directly — the
+	ignore_permissions flags do not reach it. Switching the session user is the
+	only reliable way to let the Warehouse read pass without granting the
+	webhook user a real role.
 	"""
-	previous = frappe.flags.get("ignore_permissions")
-	frappe.flags.ignore_permissions = True
-	try:
-		doc.flags.ignore_permissions = True
-		doc.save()
-	finally:
-		frappe.flags.ignore_permissions = previous
-
-
-def _submit_pick_list_with_inbound_flag(doc, payload: dict, correlation_id: str) -> None:
-	"""Save + submit a Draft Pick List, bypassing the human-only permission gate via the flag seam.
-
-	Pick List's on_submit hook creates nested docs — most importantly a Serial and
-	Batch Bundle for batch-tracked picks — and each nested insert runs its own
-	permission check via frappe.permissions.has_permission. That module-level
-	check honours frappe.flags.ignore_permissions but NOT a doc-level flag on the
-	parent, so we set both: the global flag for the cascade, and the doc-level
-	flag for the parent's own check. Both are restored in finally so the
-	bypass never leaks past this call.
-	"""
-	# The webhook session is Guest (allow_guest=True). ERPNext's PickList.before_save
-	# calls get_descendants_of("Warehouse", ...), which routes through frappe.get_list
-	# and consults the session user directly — ignore_permissions flags don't reach
-	# it. Switch the session user to Administrator for the duration of save/submit
-	# so the Warehouse read permission check passes, then restore.
-	previous_inbound = frappe.flags.get("wave_inbound_pick_list_submit")
-	previous_ignore = frappe.flags.get("ignore_permissions")
 	previous_user = frappe.session.user
-	frappe.flags.wave_inbound_pick_list_submit = True
+	previous_ignore = frappe.flags.get("ignore_permissions")
 	frappe.flags.ignore_permissions = True
 	try:
 		frappe.set_user("Administrator")
-		doc.flags.ignore_permissions = True
-		doc.save()
-		doc.submit()
-		_log_submitted(doc, payload, correlation_id)
+		yield
+	finally:
+		frappe.set_user(previous_user)
+		frappe.flags.ignore_permissions = previous_ignore
+
+
+def _save_without_submit(doc, payload: dict, correlation_id: str) -> None:
+	"""Persist line + comment edits on a Draft Pick List under the Administrator bypass.
+
+	Save-only path covers the REPLACED-SKU and disparity branches; the PL stays
+	Draft for operator review. Save failure is caught and logged so the inbound
+	webhook is still acknowledged — operator can retry via the manual resync.
+	"""
+	try:
+		with _as_administrator_with_ignore_permissions():
+			doc.flags.ignore_permissions = True
+			doc.save()
+	except Exception as exc:
+		frappe.db.rollback()
+		_log_save_failed(doc, payload, correlation_id, exc)
+
+
+def _submit_pick_list_with_inbound_flag(doc, payload: dict, correlation_id: str) -> None:
+	"""Save + submit a Draft Pick List under the Administrator bypass + inbound flag.
+
+	The inbound flag short-circuits the human-only submit gate in
+	handlers.pick_list.block_unprivileged_pick_list_submit. Administrator
+	impersonation gets the nested Warehouse read past the Guest session.
+	"""
+	previous_inbound = frappe.flags.get("wave_inbound_pick_list_submit")
+	frappe.flags.wave_inbound_pick_list_submit = True
+	try:
+		with _as_administrator_with_ignore_permissions():
+			doc.flags.ignore_permissions = True
+			doc.save()
+			doc.submit()
+			_log_submitted(doc, payload, correlation_id)
 	except Exception as exc:
 		frappe.db.rollback()
 		_log_submit_failed(doc, payload, correlation_id, exc)
 	finally:
-		frappe.set_user(previous_user)
 		frappe.flags.wave_inbound_pick_list_submit = previous_inbound
-		frappe.flags.ignore_permissions = previous_ignore
 
 
 def _build_terminal_summary_html(payload: dict, index: dict[str, dict], state_label: str) -> str:
@@ -495,6 +505,20 @@ def _log_submit_failed(doc, payload: dict, correlation_id: str, exc: Exception) 
 	"""Error audit row when Pick List submit raises."""
 	log_step(
 		correlation_id, STEP_SUBMIT_FAILED, "Error",
+		doc_type="ORDER", action="UPDATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		linked_doctype="Pick List",
+		linked_docname=doc.name,
+		error_message=str(exc),
+		stack_trace=frappe.get_traceback(),
+	)
+
+
+def _log_save_failed(doc, payload: dict, correlation_id: str, exc: Exception) -> None:
+	"""Error audit row when the save-only path (REPLACED / disparity) raises."""
+	log_step(
+		correlation_id, STEP_SAVE_FAILED, "Error",
 		doc_type="ORDER", action="UPDATE",
 		wave_id=payload.get("_id"),
 		friendly_id=payload.get("friendlyId"),
