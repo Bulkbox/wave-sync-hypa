@@ -120,6 +120,12 @@ def _stamp_success(
 	so.db_set("wave_friendly_id", wave_friendly_id or "", update_modified=False)
 	so.db_set("wave_origin", "ERP Push", update_modified=False)
 	so.db_set("wave_push_failure_required_review", 0, update_modified=False)
+	# Stamp the Wave friendly id into Customer's Purchase Order (po_no) so it is
+	# visible/searchable in the standard SO list view's PO column. Only when
+	# empty — the operator may have entered a paper PO manually before the push,
+	# and overwriting it would lose information.
+	if wave_friendly_id and not (so.po_no or "").strip():
+		so.db_set("po_no", wave_friendly_id, update_modified=False)
 	so.add_comment(
 		"Comment",
 		f"Pushed to Wave successfully — wave_order_id = <code>{wave_order_id}</code>, "

@@ -16,11 +16,14 @@ const PICK_LIST_OVERRIDE_ROLE = "Pick List Wave Override";
 frappe.ui.form.on("Pick List", {
 	refresh(frm) {
 		if (frm.is_new()) return;
-		frm.add_custom_button(
-			__("Send Batch IDs to Wave"),
-			() => _confirm_and_push(frm),
-			__("Wave Sync")
-		);
+		// Only on Draft — the picker work is over once the PL is submitted/cancelled.
+		if (frm.doc.docstatus === 0) {
+			frm.add_custom_button(
+				__("Send Batch IDs to Wave"),
+				() => _confirm_and_push(frm),
+				__("Wave Sync")
+			);
+		}
 		_maybe_hide_submit_when_locked_down(frm);
 	},
 });

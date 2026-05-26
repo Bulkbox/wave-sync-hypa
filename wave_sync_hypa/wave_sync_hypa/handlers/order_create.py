@@ -192,6 +192,7 @@ def _build_sales_order_header(
 			"order_type": "Sales",
 			"customer_address": shipping_address,
 			"shipping_address_name": shipping_address,
+			"po_no": payload.get("friendlyId"),
 			"wave_order_id": payload.get("_id"),
 			"wave_friendly_id": payload.get("friendlyId"),
 			"wave_status": payload.get("status"),
