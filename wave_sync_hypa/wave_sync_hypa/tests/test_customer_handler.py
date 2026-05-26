@@ -200,3 +200,121 @@ class TestCustomerHandler(FrappeTestCase):
 		self.assertEqual(
 			customer_rows[0].linked_docname, find_customer_by_wave_id(self.wave_customer_id)
 		)
+
+	def test_same_wave_address_id_with_changed_content_updates_in_place(self):
+		"""Wave keeps _id stable on edits; managed fields overwrite, no second row."""
+		handle(self._payload(addresses=[self._address()]), self.correlation_id)
+		address_name = frappe.db.get_value(
+			"Address", {"wave_address_id": self.wave_address_id}, "name"
+		)
+
+		handle(
+			self._payload(
+				addresses=[self._address(city="Mombasa", contactPhone="6700000000", street="Mama Ngina")]
+			),
+			self.correlation_id,
+		)
+
+		matches = frappe.get_all(
+			"Address", filters={"wave_address_id": self.wave_address_id}, pluck="name"
+		)
+		self.assertEqual(matches, [address_name])
+		row = frappe.db.get_value(
+			"Address", address_name, ("city", "phone", "address_line1"), as_dict=True
+		)
+		self.assertEqual(row.city, "Mombasa")
+		self.assertEqual(row.phone, "6700000000")
+		self.assertIn("Mama Ngina", row.address_line1)
+
+	def test_same_wave_address_id_with_changed_content_logs_diff(self):
+		"""An update emits an address_upsert_updated row whose request_body carries the diff."""
+		handle(self._payload(addresses=[self._address()]), self.correlation_id)
+		handle(
+			self._payload(addresses=[self._address(city="Mombasa")]),
+			self.correlation_id,
+		)
+		rows = frappe.get_all(
+			"Wave Sync Log",
+			filters={
+				"correlation_id": self.correlation_id,
+				"step": "address_upsert_updated",
+			},
+			fields=["request_body"],
+		)
+		self.assertEqual(len(rows), 1)
+		body = frappe.parse_json(rows[0].request_body)
+		self.assertEqual(body["wave_address_id"], self.wave_address_id)
+		diff_fields = {entry["field"] for entry in body["diff"]}
+		self.assertIn("city", diff_fields)
+
+	def test_same_wave_address_id_with_identical_content_writes_no_upsert_log(self):
+		"""Identical re-send is a cheap no-op — no log row, no DB write."""
+		handle(self._payload(addresses=[self._address()]), self.correlation_id)
+		handle(self._payload(addresses=[self._address()]), self.correlation_id)
+		rows = frappe.get_all(
+			"Wave Sync Log",
+			filters={
+				"correlation_id": self.correlation_id,
+				"step": "address_upsert_updated",
+			},
+		)
+		self.assertEqual(len(rows), 0)
+
+	def test_address_missing_from_payload_is_disabled_and_unlinked(self):
+		"""Wave dropped an address -> ERP disables it + removes the Customer link row."""
+		# First payload seeds one address.
+		handle(self._payload(addresses=[self._address()]), self.correlation_id)
+		address_name = frappe.db.get_value(
+			"Address", {"wave_address_id": self.wave_address_id}, "name"
+		)
+		self.assertIsNotNone(address_name)
+
+		# Second payload omits that address entirely.
+		handle(self._payload(addresses=[]), self.correlation_id)
+
+		# Address still exists (soft-delete) but disabled and unlinked.
+		self.assertEqual(int(frappe.db.get_value("Address", address_name, "disabled") or 0), 1)
+		links = frappe.get_all(
+			"Dynamic Link",
+			filters={
+				"parent": address_name,
+				"link_doctype": "Customer",
+			},
+		)
+		self.assertEqual(len(links), 0)
+		# Log row recorded.
+		log_rows = frappe.get_all(
+			"Wave Sync Log",
+			filters={
+				"correlation_id": self.correlation_id,
+				"step": "address_unlinked_on_wave_delete",
+			},
+		)
+		self.assertEqual(len(log_rows), 1)
+
+	def test_payload_without_addresses_key_does_not_disable_anything(self):
+		"""Missing `addresses` key is treated as 'untouched', not 'all deleted'."""
+		handle(self._payload(addresses=[self._address()]), self.correlation_id)
+		address_name = frappe.db.get_value(
+			"Address", {"wave_address_id": self.wave_address_id}, "name"
+		)
+		self.assertIsNotNone(address_name)
+
+		# Build a payload WITHOUT the addresses key (defensive shape).
+		payload = self._payload()
+		payload.pop("addresses", None)
+		handle(payload, self.correlation_id)
+
+		# Address still active, link intact.
+		self.assertEqual(int(frappe.db.get_value("Address", address_name, "disabled") or 0), 0)
+		links = frappe.get_all(
+			"Dynamic Link",
+			filters={
+				"parent": address_name,
+				"link_doctype": "Customer",
+				"link_name": frappe.db.get_value(
+					"Customer", {"wave_customer_id": self.wave_customer_id}, "name"
+				),
+			},
+		)
+		self.assertEqual(len(links), 1)
