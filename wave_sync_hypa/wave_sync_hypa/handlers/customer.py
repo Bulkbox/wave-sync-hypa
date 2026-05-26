@@ -6,7 +6,10 @@ sequences them and records one Wave Sync Log row per stage boundary.
 
 import frappe
 
-from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_new
+from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import (
+	append_if_new,
+	disable_addresses_missing_from_payload,
+)
 from wave_sync_hypa.wave_sync_hypa.resolvers.contact_resolver import upsert_contact
 from wave_sync_hypa.wave_sync_hypa.resolvers.customer_resolver import (
 	append_business_address_if_present,
@@ -91,6 +94,20 @@ def handle(payload: dict, correlation_id: str) -> None:
 	for wave_address in payload.get("addresses") or []:
 		_append_address(correlation_id, customer_name, wave_address, wave_id, wave_updated_at)
 
+	# Delete propagation: when Wave omits a wave_address_id we previously knew,
+	# soft-delete the ERP Address (disabled=1 + unlink from Customer). Only run
+	# when the payload explicitly contains the `addresses` key — a CUSTOMER.UPDATE
+	# that omits the key entirely is treated as "addresses untouched", not "all
+	# addresses deleted." An empty list IS treated as "customer cleared all
+	# addresses" per the agreed contract.
+	if "addresses" in payload:
+		payload_address_ids = {
+			(a.get("_id") or "").strip()
+			for a in (payload.get("addresses") or [])
+			if a.get("_id")
+		}
+		disable_addresses_missing_from_payload(customer_name, payload_address_ids, correlation_id)
+
 	# B2B-only: businessAddress is a separate top-level field, not part of
 	# addresses[]. The resolver handles classification + idempotency; we just
 	# log the outcome the same way as a regular Wave address append.
@@ -154,7 +171,7 @@ def _append_address(
 	wave_updated_at: str | None,
 ) -> None:
 	"""Append one Wave address if it's new; log whether an Address was created or reused."""
-	address_name, created = append_if_new(customer_name, wave_address)
+	address_name, created = append_if_new(customer_name, wave_address, correlation_id)
 	log_step(
 		correlation_id,
 		"Resolved Customer",
