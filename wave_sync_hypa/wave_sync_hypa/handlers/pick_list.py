@@ -79,6 +79,9 @@ def stamp_wave_order_id(doc, method=None) -> None:
 	if not wave_ids:
 		return
 	doc.wave_order_id = wave_ids[0]
+	doc.wave_friendly_id = (
+		frappe.db.get_value("Sales Order", {"wave_order_id": wave_ids[0]}, "wave_friendly_id") or ""
+	)
 	if len(wave_ids) > 1:
 		log_step(
 			correlation_id=new_correlation_id(),

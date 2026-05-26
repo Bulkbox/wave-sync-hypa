@@ -36,11 +36,12 @@ def _settings(*, push_enabled: int = 1, shop_id: str = "wave-shop-1", full_outbo
 	return settings
 
 
-def _so(wave_order_id: str = "") -> MagicMock:
+def _so(wave_order_id: str = "", po_no: str = "") -> MagicMock:
 	doc = MagicMock(name="SalesOrderDoc")
 	doc.name = SO_NAME
 	doc.doctype = "Sales Order"
 	doc.wave_order_id = wave_order_id
+	doc.po_no = po_no
 	doc.get.side_effect = lambda key, default=None: {
 		"wave_order_id": wave_order_id,
 		"customer": "CUST-001",
@@ -222,3 +223,34 @@ class TestPushSoToWaveHappyPath(FrappeTestCase):
 		steps = [c.args[1] for c in mock_log.call_args_list]
 		self.assertIn(wave_order_creator.STEP_PUSH_SUCCEEDED, steps)
 		self.assertIn(wave_order_creator.STEP_PUSH_ATTEMPT, steps)
+
+	def test_success_stamps_po_no_when_currently_empty(self):
+		"""Empty po_no -> stamp it with the Wave friendly id so it shows up in the SO list's PO column."""
+		so = _so(po_no="")
+		response = {"_id": WAVE_ORDER_ID, "friendlyId": WAVE_FRIENDLY_ID, "status": "PENDING"}
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe, "get_doc", return_value=so),
+			patch.object(wave_order_creator.wave_customer_resolver, "resolve_wave_customer_for_so", return_value="cust-1"),
+			patch.object(wave_order_creator.wave_order_builder, "build_order_payload", return_value={"products": [], "totalPrice": 0}),
+			patch.object(wave_order_creator.wave_client, "create_admin_order", return_value=response),
+			patch.object(wave_order_creator, "log_step"),
+		):
+			wave_order_creator.push_so_to_wave(SO_NAME, "corr-po")
+		so.db_set.assert_any_call("po_no", WAVE_FRIENDLY_ID, update_modified=False)
+
+	def test_success_does_not_overwrite_existing_po_no(self):
+		"""An operator-set po_no must survive a successful push — never clobbered."""
+		so = _so(po_no="OPERATOR-PO-123")
+		response = {"_id": WAVE_ORDER_ID, "friendlyId": WAVE_FRIENDLY_ID, "status": "PENDING"}
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe, "get_doc", return_value=so),
+			patch.object(wave_order_creator.wave_customer_resolver, "resolve_wave_customer_for_so", return_value="cust-1"),
+			patch.object(wave_order_creator.wave_order_builder, "build_order_payload", return_value={"products": [], "totalPrice": 0}),
+			patch.object(wave_order_creator.wave_client, "create_admin_order", return_value=response),
+			patch.object(wave_order_creator, "log_step"),
+		):
+			wave_order_creator.push_so_to_wave(SO_NAME, "corr-po-keep")
+		po_no_calls = [c for c in so.db_set.call_args_list if c.args and c.args[0] == "po_no"]
+		self.assertEqual(po_no_calls, [], "po_no must not be touched when already set.")

@@ -83,19 +83,31 @@ class TestStampWaveOrderId(FrappeTestCase):
 
 	def test_stamps_single_source_so_wave_order_id(self):
 		doc = _pl(locations=[_row("SO-001"), _row("SO-001")])
+
+		def _get(_doctype, key, field, *a, **kw):
+			if field == "wave_order_id":
+				return WAVE_ID_A
+			if field == "wave_friendly_id":
+				return "10000111"
+			return None
+
 		with (
-			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(frappe.db, "get_value", side_effect=_get),
 			patch.object(pl_handler, "log_step") as mock_log,
 		):
 			pl_handler.stamp_wave_order_id(doc)
 
 		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
+		self.assertEqual(doc.wave_friendly_id, "10000111")
 		mock_log.assert_not_called()
 
 	def test_stamps_first_when_multiple_distinct_wave_orders_and_warns(self):
 		doc = _pl(locations=[_row("SO-001"), _row("SO-002")])
 
 		def _by_so(*args, **kwargs):
+			# Friendly-id lookup: filter dict {"wave_order_id": <id>} keyed by WAVE_ID_A.
+			if isinstance(args[1], dict):
+				return {WAVE_ID_A: "10000222"}.get(args[1].get("wave_order_id"))
 			return {"SO-001": WAVE_ID_A, "SO-002": WAVE_ID_B}.get(args[1])
 
 		with (
@@ -105,6 +117,7 @@ class TestStampWaveOrderId(FrappeTestCase):
 			pl_handler.stamp_wave_order_id(doc)
 
 		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
+		self.assertEqual(doc.wave_friendly_id, "10000222")
 		warnings = [
 			c for c in mock_log.call_args_list
 			if c.kwargs.get("step") == pl_handler.STEP_STAMP_MULTI_SOURCE

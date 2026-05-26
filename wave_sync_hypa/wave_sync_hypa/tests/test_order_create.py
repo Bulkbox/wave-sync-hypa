@@ -266,6 +266,10 @@ class TestOrderCreate(FrappeTestCase):
 		self.assertEqual(int(so.docstatus), 0)
 		self.assertEqual(so.wave_friendly_id, self.friendly_id)
 		self.assertEqual(so.wave_correlation_id, self.correlation_id)
+		# Wave friendly id is stamped into Customer's Purchase Order (po_no) so it
+		# shows up in the standard SO list view's PO column without operators
+		# needing a custom column for wave_friendly_id.
+		self.assertEqual(so.po_no, self.friendly_id)
 		item_codes = [row.item_code for row in so.items]
 		self.assertIn(self.product_sku, item_codes)
 		self.assertIn(self.fee_item, item_codes)
