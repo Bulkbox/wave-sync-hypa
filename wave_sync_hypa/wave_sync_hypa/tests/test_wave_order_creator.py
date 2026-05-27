@@ -22,6 +22,7 @@ WAVE_FRIENDLY_ID = "10000099"
 
 def _settings(*, push_enabled: int = 1, shop_id: str = "wave-shop-1", full_outbound: bool = True) -> MagicMock:
 	values = {
+		"enabled": 1,
 		"erp_to_wave_push_enabled": push_enabled,
 		"wave_shop_id": shop_id,
 		"wave_api_base_url": "https://wave.example.com" if full_outbound else "",

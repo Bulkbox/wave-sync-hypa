@@ -41,6 +41,7 @@ def _stub_settings(
 	"""Return a MagicMock that mimics Wave Settings .get / .get_password."""
 	settings = MagicMock(name="WaveSettings")
 	values = {
+		"enabled": 1,
 		"outbound_stock_sync_enabled": 1 if enabled else 0,
 		"outbound_stock_caps_max_quantity_enabled": 1 if caps_max_quantity else 0,
 		"default_warehouse": default_warehouse,

@@ -16,6 +16,10 @@ import frappe
 from wave_sync_hypa.wave_sync_hypa.services.dispatcher import resolve_handler
 from wave_sync_hypa.wave_sync_hypa.services.idempotency import is_duplicate
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
+	STEP_MASTER_DISABLED,
+	is_wave_integration_enabled,
+)
 
 
 def process_webhook(
@@ -28,6 +32,18 @@ def process_webhook(
 	wave_id = (payload or {}).get("_id")
 	wave_updated_at = (payload or {}).get("updatedAt")
 	friendly_id = (payload or {}).get("friendlyId")
+
+	# Master kill switch: defence-in-depth. The HTTP endpoint also checks this,
+	# but direct callers (e.g. console replay, future internal queues) reach
+	# the processor without passing through api/webhook.receive.
+	if not is_wave_integration_enabled():
+		log_step(
+			correlation_id, STEP_MASTER_DISABLED, "Info",
+			doc_type=doc_type, action=action,
+			wave_id=wave_id, wave_updated_at=wave_updated_at, friendly_id=friendly_id,
+			response_body={"reason": "wave_integration master kill switch is off"},
+		)
+		return
 
 	if is_duplicate(wave_id, wave_updated_at):
 		log_step(

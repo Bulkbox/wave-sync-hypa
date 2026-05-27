@@ -25,6 +25,7 @@ DUMMY_WAVE_ORDER_ID = "wave-id-aaa"
 def _settings(*, batch_ids_enabled: int = 1, full_config: bool = True) -> MagicMock:
 	"""Wave Settings stand-in: kill-switch + outbound HTTP config."""
 	values = {
+		"enabled": 1,
 		"pick_list_batch_ids_push_enabled": batch_ids_enabled,
 		"wave_api_base_url": DUMMY_BASE_URL if full_config else "",
 		"wave_app_id": DUMMY_APP_ID if full_config else "",

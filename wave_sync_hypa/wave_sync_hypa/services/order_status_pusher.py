@@ -30,6 +30,10 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services import wave_client
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
+	STEP_MASTER_DISABLED,
+	is_wave_integration_enabled,
+)
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 
 STEP_PUSH_ATTEMPT = "order_status_push_attempt"
@@ -108,6 +112,7 @@ def push_order_status(
 		source_docname = sales_order_name
 	if payload is None:
 		payload = {}
+
 	log_step(
 		correlation_id=correlation_id,
 		step=STEP_WORKER_STARTED,
@@ -119,6 +124,23 @@ def push_order_status(
 		wave_id=wave_order_id or None,
 	)
 	try:
+		# Master kill switch check sits INSIDE the try/except so that a
+		# failure reading Wave Settings (transient DB / cache fault) is
+		# absorbed by the same defensive log_unexpected_error path that
+		# wraps every other line of _push_inner, preserving the worker's
+		# never-raise contract.
+		if not is_wave_integration_enabled():
+			log_step(
+				correlation_id=correlation_id,
+				step=STEP_MASTER_DISABLED,
+				level="Info",
+				doc_type=source_doctype,
+				action=erp_event,
+				linked_doctype=source_doctype,
+				linked_docname=source_docname,
+				wave_id=wave_order_id or None,
+			)
+			return
 		_push_inner(source_doctype, source_docname, erp_event, payload, correlation_id, wave_order_id)
 	except Exception as exc:
 		log_step(

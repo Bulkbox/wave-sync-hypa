@@ -24,6 +24,10 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services import product_resolver, wave_client
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
+	STEP_MASTER_DISABLED,
+	is_wave_integration_enabled,
+)
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 
 STEP_WORKER_STARTED = "pick_list_batch_ids_push_worker_started"
@@ -69,6 +73,20 @@ def push_pick_list_batch_ids(
 		request_body={"manual_trigger": manual_trigger} if manual_trigger else None,
 	)
 	try:
+		# Master kill switch check sits INSIDE the try/except: a failure
+		# reading Wave Settings must not break the worker's never-raise
+		# contract.
+		if not is_wave_integration_enabled():
+			log_step(
+				correlation_id=correlation_id,
+				step=STEP_MASTER_DISABLED,
+				level="Info",
+				doc_type="Pick List",
+				linked_doctype="Pick List",
+				linked_docname=pick_list_name,
+				wave_id=wave_order_id or None,
+			)
+			return
 		_push_inner(pick_list_name, wave_order_id, products_data, correlation_id, manual_trigger)
 	except Exception as exc:
 		log_step(
