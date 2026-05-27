@@ -74,6 +74,9 @@ def push_item_stock(item_code: str, correlation_id: str, batch_id: str | None = 
 
 def _push_item_stock_inner(item_code: str, correlation_id: str, batch_id: str | None) -> None:
 	"""Real work: validate config, resolve Wave id, read Bin, POST, retry on PRODUCT0006."""
+	# Master kill switch check sits in _inner (not push_item_stock) so any
+	# failure reading Wave Settings is absorbed by the outer try/except in
+	# push_item_stock, preserving the worker's never-raise contract.
 	if not is_wave_integration_enabled():
 		log_step(
 			correlation_id=correlation_id,

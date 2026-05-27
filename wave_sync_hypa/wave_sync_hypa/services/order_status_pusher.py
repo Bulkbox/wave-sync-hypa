@@ -124,11 +124,9 @@ def push_order_status(
 		wave_id=wave_order_id or None,
 	)
 	try:
-		# Master kill switch check sits INSIDE the try/except so that a
-		# failure reading Wave Settings (transient DB / cache fault) is
-		# absorbed by the same defensive log_unexpected_error path that
-		# wraps every other line of _push_inner, preserving the worker's
-		# never-raise contract.
+		# Master kill switch check sits INSIDE the try/except: a failure
+		# reading Wave Settings must not break the worker's never-raise
+		# contract.
 		if not is_wave_integration_enabled():
 			log_step(
 				correlation_id=correlation_id,
