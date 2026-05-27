@@ -12,12 +12,18 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from wave_sync_hypa.wave_sync_hypa.api import (
+	pick_list as pl_api,
+	sales_order_status as so_status_api,
+	wave_settings as ws_api,
+)
 from wave_sync_hypa.wave_sync_hypa.services import (
 	master_switch,
 	order_status_pusher,
 	pick_list_batch_pusher,
 	processor,
 	stock_pusher,
+	stock_resync,
 	wave_order_creator,
 )
 
@@ -133,3 +139,61 @@ class TestPickListBatchPusherRespectsMasterSwitch(FrappeTestCase):
 		mock_patch.assert_not_called()
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(master_switch.STEP_MASTER_DISABLED, steps)
+
+
+class TestManualApiEndpointsRefuseWhenMasterOff(FrappeTestCase):
+	"""Click-time refusal: 3 manual buttons return {ok: False, reason: ...} when master is off.
+
+	The async-enqueue paths used to silently drop work in the worker — operators
+	saw a green "queued" toast. This class pins the synchronous refusal layer so
+	the click immediately surfaces an actionable message.
+	"""
+
+	def test_push_batch_ids_now_refuses_without_enqueue(self):
+		"""api/pick_list.push_batch_ids_now short-circuits when master is off."""
+		fake_doc = MagicMock(name="PickListDoc")
+		fake_doc.check_permission.return_value = None
+		with (
+			patch.object(frappe, "get_doc", return_value=fake_doc),
+			patch.object(pl_api, "is_wave_integration_enabled", return_value=False),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+		):
+			result = pl_api.push_batch_ids_now("PL-x")
+		self.assertFalse(result["ok"])
+		self.assertIn("disabled", result["reason"].lower())
+		mock_enqueue.assert_not_called()
+
+	def test_resync_order_status_refuses_via_helper_throw(self):
+		"""api/sales_order_status._refuse_if_settings_disabled now throws on master off."""
+		settings = MagicMock(name="WaveSettings")
+		settings.get.side_effect = lambda key, default=None: {"enabled": 0}.get(key, default)
+		# outbound_order_status_sync_enabled attribute access — return truthy
+		settings.outbound_order_status_sync_enabled = 1
+		with self.assertRaises(frappe.ValidationError):
+			so_status_api._refuse_if_settings_disabled(settings)
+
+	def test_start_full_resync_refuses_via_helper_throw(self):
+		"""api/wave_settings._refuse_if_misconfigured now throws on master off before per-channel check."""
+		settings = MagicMock(name="WaveSettings")
+		settings.get.side_effect = lambda key, default=None: {"enabled": 0}.get(key, default)
+		settings.outbound_stock_sync_enabled = 1
+		with self.assertRaises(frappe.ValidationError):
+			ws_api._refuse_if_misconfigured(settings)
+
+	def test_stock_resync_coordinator_aborts_when_master_off(self):
+		"""services/stock_resync._run_resync defence-in-depth: master off -> STEP_RESYNC_ABORTED, no fan-out."""
+		settings = MagicMock(name="WaveSettings")
+		settings.get.side_effect = lambda key, default=None: {
+			"enabled": 0,
+			"outbound_stock_sync_enabled": 1,
+			"default_warehouse": "WH-1",
+		}.get(key, default)
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(stock_resync, "log_step") as mock_log,
+			patch.object(stock_resync, "_enqueue_each_item") as mock_enqueue_each,
+		):
+			stock_resync._run_resync("batch-1", item_codes=None)
+		mock_enqueue_each.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(stock_resync.STEP_RESYNC_ABORTED, steps)

@@ -47,6 +47,8 @@ def start_full_resync(item_codes: list[str] | str | None = None) -> dict:
 
 def _refuse_if_misconfigured(settings) -> None:
 	"""Throw with an operator-friendly message if the integration cannot make HTTP calls."""
+	if not settings.get("enabled"):
+		frappe.throw(_("Wave integration is disabled in Wave Settings; turn it on first."))
 	if not settings.outbound_stock_sync_enabled:
 		frappe.throw(_("Outbound Stock Sync is disabled in Wave Settings; turn it on first."))
 	for field in REQUIRED_OUTBOUND_FIELDS:

@@ -78,7 +78,9 @@ def _refuse_if_not_pushable(doc) -> None:
 
 
 def _refuse_if_settings_disabled(settings) -> None:
-	"""Loud-fail at click time when the kill-switch is off rather than queueing a no-op."""
+	"""Loud-fail at click time when either kill switch is off rather than queueing a no-op."""
+	if not settings.get("enabled"):
+		frappe.throw(_("Wave integration is disabled in Wave Settings; turn it on first."))
 	if not settings.outbound_order_status_sync_enabled:
 		frappe.throw(_("Outbound Order Status Sync is disabled in Wave Settings; turn it on first."))
 

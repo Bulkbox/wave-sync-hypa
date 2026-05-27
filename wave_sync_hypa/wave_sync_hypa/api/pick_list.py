@@ -14,6 +14,7 @@ from frappe import _
 from wave_sync_hypa.wave_sync_hypa.handlers import pick_list as pl_handler
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import is_wave_integration_enabled
 
 STEP_MANUAL_TRIGGER_REQUESTED = "pick_list_batch_ids_push_manual_trigger_requested"
 STEP_MANUAL_TRIGGER_NO_WAVE_ORDERS = "pick_list_batch_ids_push_manual_trigger_no_wave_orders"
@@ -29,6 +30,9 @@ def push_batch_ids_now(pick_list: str) -> dict:
 	"""
 	doc = frappe.get_doc("Pick List", pick_list)
 	doc.check_permission("write")
+
+	if not is_wave_integration_enabled():
+		return {"ok": False, "reason": _("Wave integration is disabled in Wave Settings.")}
 
 	wave_ids = pl_handler._collect_distinct_wave_order_ids(doc)
 	if not wave_ids and doc.get("wave_order_id"):
