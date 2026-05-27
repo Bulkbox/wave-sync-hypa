@@ -39,9 +39,9 @@ def _pl_doc(locations: list[dict] | None = None, wave_order_id: str = "") -> Mag
 
 
 def _settings_stub() -> MagicMock:
-	"""Wave Settings stand-in returning blank picker_identifier_source (today's batch mode)."""
+	"""Wave Settings stand-in: master kill switch on, blank picker_identifier_source."""
 	settings = MagicMock(name="WaveSettings")
-	settings.get.side_effect = lambda key, default=None: default
+	settings.get.side_effect = lambda key, default=None: {"enabled": 1}.get(key, default)
 	return settings
 
 
@@ -52,6 +52,7 @@ class TestPushBatchIdsNow(FrappeTestCase):
 		doc = _pl_doc(locations=[_row("SO-NON-WAVE", item_code="X", batch_no="B-1")])
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),
+			patch.object(pl_api, "is_wave_integration_enabled", return_value=True),
 			patch.object(frappe.db, "get_value", return_value=None),
 			patch.object(frappe, "enqueue") as mock_enqueue,
 			patch.object(pl_api, "log_step") as mock_log,

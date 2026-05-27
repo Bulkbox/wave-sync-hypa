@@ -27,6 +27,7 @@ def _stub_settings(*, enabled: bool = True, default_warehouse: str = DUMMY_DEFAU
 				   api_key: str = "test-api-key") -> SimpleNamespace:
 	"""Build a settings stand-in usable by both the endpoint (full Doc) and the coordinator (cached doc)."""
 	stub = SimpleNamespace()
+	stub.enabled = 1
 	stub.outbound_stock_sync_enabled = 1 if enabled else 0
 	stub.default_warehouse = default_warehouse
 	stub.wave_api_base_url = base_url
@@ -35,6 +36,7 @@ def _stub_settings(*, enabled: bool = True, default_warehouse: str = DUMMY_DEFAU
 	stub._api_key = api_key
 
 	values = {
+		"enabled": 1,
 		"outbound_stock_sync_enabled": stub.outbound_stock_sync_enabled,
 		"default_warehouse": default_warehouse,
 		"wave_api_base_url": base_url,

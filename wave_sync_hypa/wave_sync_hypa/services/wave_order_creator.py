@@ -23,6 +23,10 @@ from wave_sync_hypa.wave_sync_hypa.services import (
 	wave_order_builder,
 )
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
+	STEP_MASTER_DISABLED,
+	is_wave_integration_enabled,
+)
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError, WaveResolutionError
 
 STEP_PUSH_ATTEMPT = "erp_to_wave_push_attempt"
@@ -37,6 +41,14 @@ STEP_PUSH_ABORTED_UNRESOLVABLE = "erp_to_wave_push_aborted_unresolvable_items"
 
 def push_so_to_wave(so_name: str, correlation_id: str) -> dict:
 	"""Push a Sales Order to Wave; return a structured result dict (never raises)."""
+	if not is_wave_integration_enabled():
+		log_step(
+			correlation_id, STEP_MASTER_DISABLED, "Info",
+			doc_type="Sales Order", linked_doctype="Sales Order", linked_docname=so_name,
+			error_message="Wave integration master kill switch is off.",
+		)
+		return {"ok": False, "reason": "Wave integration is disabled in Wave Settings"}
+
 	settings = frappe.get_cached_doc("Wave Settings")
 
 	if not settings.get("erp_to_wave_push_enabled"):

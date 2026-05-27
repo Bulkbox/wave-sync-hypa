@@ -30,6 +30,10 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services import product_resolver, wave_client
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
+	STEP_MASTER_DISABLED,
+	is_wave_integration_enabled,
+)
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 
 STEP_PUSH_ATTEMPT = "stock_sync_push_attempt"
@@ -70,6 +74,22 @@ def push_item_stock(item_code: str, correlation_id: str, batch_id: str | None = 
 
 def _push_item_stock_inner(item_code: str, correlation_id: str, batch_id: str | None) -> None:
 	"""Real work: validate config, resolve Wave id, read Bin, POST, retry on PRODUCT0006."""
+	# Master kill switch check sits in _inner (not push_item_stock) so any
+	# failure reading Wave Settings is absorbed by the outer try/except in
+	# push_item_stock, preserving the worker's never-raise contract.
+	if not is_wave_integration_enabled():
+		log_step(
+			correlation_id=correlation_id,
+			step=STEP_MASTER_DISABLED,
+			level="Info",
+			doc_type="Item",
+			linked_doctype="Item",
+			linked_docname=item_code,
+			friendly_id=batch_id,
+			error_message="Wave integration master kill switch is off.",
+		)
+		return
+
 	settings = frappe.get_cached_doc("Wave Settings")
 
 	if not settings.get("outbound_stock_sync_enabled"):

@@ -7,10 +7,13 @@ logic runs here; everything heavy happens in the background worker via
 
 Flow per request:
  1. Generate a correlation_id for this webhook.
- 2. Load Wave Settings; refuse if disabled.
- 3. Authenticate with `x-api-key` against the stored secret.
- 4. Parse `?doc=` and the JSON body.
- 5. Log "Received" with the snapshot.
+ 2. Authenticate with `x-api-key` against the stored secret.
+ 3. Parse `?doc=` and the JSON body.
+ 4. Log "Received" with the snapshot (carries the payload for replay).
+ 5. Check the master kill switch (Wave Settings.enabled). When off, log
+    a `wave_integration_master_disabled` row and return 200 with
+    `master_disabled: True` — avoids Wave's retry-storm and keeps the
+    payload on disk for replay once the switch flips back on.
  6. Enqueue the processor with a deterministic job_name (queue-level dedup).
  7. Log "Enqueued" and return 200 immediately.
 """
@@ -22,6 +25,10 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
+	STEP_MASTER_DISABLED,
+	is_wave_integration_enabled,
+)
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveAuthError, WaveValidationError
 
 
@@ -33,7 +40,7 @@ def receive():
 	"""HTTP entry: ack first, process later. Returns {ok, correlation_id} with HTTP 200."""
 	correlation_id = new_correlation_id()
 	try:
-		settings = _load_enabled_settings()
+		settings = frappe.get_cached_doc("Wave Settings")
 		_authenticate(settings, correlation_id)
 		doc_type = _read_doc_query()
 		body = _read_body()
@@ -55,6 +62,21 @@ def receive():
 		friendly_id=payload.get("friendlyId"),
 		request_body=body,
 	)
+
+	# Master kill switch: log + accept (return 200) when off so Wave doesn't
+	# retry-storm. The Received row above carries the payload for replay once
+	# the operator flips the switch back on. Auth still runs first to keep
+	# unauthenticated callers from spamming the audit log.
+	if not is_wave_integration_enabled():
+		log_step(
+			correlation_id, STEP_MASTER_DISABLED, "Info",
+			doc_type=doc_type, action=action,
+			wave_id=payload.get("_id"), wave_updated_at=payload.get("updatedAt"),
+			friendly_id=payload.get("friendlyId"),
+			response_body={"reason": "wave_integration master kill switch is off"},
+		)
+		return {"ok": True, "correlation_id": correlation_id, "master_disabled": True}
+
 	_enqueue_processing(correlation_id, doc_type, action, payload)
 	log_step(
 		correlation_id,
@@ -67,14 +89,6 @@ def receive():
 		friendly_id=payload.get("friendlyId"),
 	)
 	return {"ok": True, "correlation_id": correlation_id}
-
-
-def _load_enabled_settings():
-	"""Return the Wave Settings doc if the integration is enabled, else raise WaveAuthError."""
-	settings = frappe.get_cached_doc("Wave Settings")
-	if not settings.enabled:
-		raise WaveAuthError("Wave integration is disabled")
-	return settings
 
 
 def _authenticate(settings, correlation_id: str) -> None:

@@ -39,6 +39,7 @@ def _stub_settings(
 	"""Return a settings stand-in with the fields the resolver / handler / worker read."""
 	settings = MagicMock(name="WaveSettings")
 	values = {
+		"enabled": 1,
 		"outbound_order_status_sync_enabled": 1 if enabled else 0,
 		"wave_api_base_url": DUMMY_BASE_URL,
 		"wave_app_id": DUMMY_APP_ID,
