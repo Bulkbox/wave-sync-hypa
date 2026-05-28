@@ -151,3 +151,72 @@ class TestCreateAdminOrder(FrappeTestCase):
 					base_url=BASE_URL, api_key=API_KEY, app_id=APP_ID, body={},
 				)
 		mock_post.assert_not_called()
+
+
+class TestPatchOrderTopLevel(FrappeTestCase):
+	"""Wrapper for PATCH /api/v3/admin/orders/{id} (order-level scalars).
+
+	Sibling of patch_order_products — that one mutates the line items
+	array; this one mutates order-level fields like pickerStatus + picking.
+	"""
+
+	ORDER_ID = "wave-order-zzz"
+
+	def test_200_returns_parsed_dict_and_sends_dict_body(self):
+		body = {"pickerStatus": None, "picking": None}
+		response_body = {"_id": self.ORDER_ID, "pickerStatus": None, "status": "ACCEPTED"}
+		fake_response = MagicMock(status_code=200, content=b'{"_id":"x"}')
+		fake_response.json.return_value = response_body
+		with patch.object(requests, "patch", return_value=fake_response) as mock_patch:
+			result = wave_client.patch_order_top_level(
+				base_url=BASE_URL, api_key=API_KEY, app_id=APP_ID,
+				order_id=self.ORDER_ID, body=body,
+			)
+		self.assertEqual(result, response_body)
+		args, kwargs = mock_patch.call_args
+		self.assertEqual(args[0], f"{BASE_URL}/api/v3/admin/orders/{self.ORDER_ID}")
+		self.assertEqual(kwargs["json"], body)
+		self.assertEqual(kwargs["headers"]["X-API-Key"], API_KEY)
+		self.assertEqual(kwargs["headers"]["appId"], APP_ID)
+
+	def test_422_raises_with_wave_code(self):
+		envelope = {"code": "ORDER0099", "userMessage": "field not writable"}
+		fake_response = MagicMock(status_code=422)
+		fake_response.text = '{"code":"ORDER0099"}'
+		fake_response.content = b'{"code":"ORDER0099"}'
+		fake_response.json.return_value = envelope
+		with patch.object(requests, "patch", return_value=fake_response):
+			with self.assertRaises(WaveOutboundError) as ctx:
+				wave_client.patch_order_top_level(
+					base_url=BASE_URL, api_key=API_KEY, app_id=APP_ID,
+					order_id=self.ORDER_ID, body={"pickerStatus": None},
+				)
+		self.assertEqual(ctx.exception.http_status, 422)
+		self.assertEqual(ctx.exception.wave_code, "ORDER0099")
+
+	def test_network_error_wrapped(self):
+		with patch.object(requests, "patch", side_effect=requests.ConnectionError("dns fail")):
+			with self.assertRaises(WaveOutboundError) as ctx:
+				wave_client.patch_order_top_level(
+					base_url=BASE_URL, api_key=API_KEY, app_id=APP_ID,
+					order_id=self.ORDER_ID, body={"pickerStatus": None},
+				)
+		self.assertIn("network error", str(ctx.exception))
+
+	def test_empty_body_rejected_without_http(self):
+		with patch.object(requests, "patch") as mock_patch:
+			with self.assertRaises(WaveOutboundError):
+				wave_client.patch_order_top_level(
+					base_url=BASE_URL, api_key=API_KEY, app_id=APP_ID,
+					order_id=self.ORDER_ID, body={},
+				)
+		mock_patch.assert_not_called()
+
+	def test_empty_order_id_rejected_without_http(self):
+		with patch.object(requests, "patch") as mock_patch:
+			with self.assertRaises(WaveOutboundError):
+				wave_client.patch_order_top_level(
+					base_url=BASE_URL, api_key=API_KEY, app_id=APP_ID,
+					order_id="", body={"pickerStatus": None},
+				)
+		mock_patch.assert_not_called()

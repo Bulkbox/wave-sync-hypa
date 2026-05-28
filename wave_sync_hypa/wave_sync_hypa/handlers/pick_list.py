@@ -122,6 +122,28 @@ def after_pick_list_insert(doc, method=None) -> None:
 	if settings.get("pick_list_batch_ids_push_enabled"):
 		_enqueue_batch_ids_pushes(doc, wave_ids, settings)
 
+	# ================================================================
+	# EXPERIMENTAL — issue #113 — PICK LIST AMEND: WAVE PICKER STATE RESET
+	# ================================================================
+	# On an amended Pick List, null `pickerStatus` + `picking` on the Wave
+	# order so the picker app re-shows it. Without this, an amended PL
+	# arrives back at Wave still flagged COLLECTED and pickers cannot
+	# pick. Scope: amend-only (doc.amended_from set).
+	#
+	# REVERT (three deletions, no other changes needed):
+	#   1. delete this fenced block
+	#   2. delete services/pick_list_amend_resetter.py
+	#   3. delete wave_client.patch_order_top_level
+	# ================================================================
+	if doc.get("amended_from"):
+		from wave_sync_hypa.wave_sync_hypa.services.pick_list_amend_resetter import (
+			enqueue_picker_state_reset,
+		)
+		enqueue_picker_state_reset(doc, wave_ids, settings)
+	# ================================================================
+	# END EXPERIMENTAL BLOCK
+	# ================================================================
+
 
 def _enqueue_batch_ids_pushes(doc, wave_ids: list[str], settings) -> None:
 	"""For each Wave order, build per-item identifier lists and enqueue one worker job."""

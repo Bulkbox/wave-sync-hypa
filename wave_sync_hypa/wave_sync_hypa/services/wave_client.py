@@ -232,6 +232,45 @@ def patch_order_products(
 	return _parse_json(response)
 
 
+def patch_order_top_level(
+	*,
+	base_url: str,
+	api_key: str,
+	app_id: str,
+	order_id: str,
+	body: dict,
+	timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+	"""PATCH /api/v3/admin/orders/{order_id} with a partial top-level order body.
+
+	The sibling of patch_order_products: that one mutates the line items
+	array; this one mutates the order-level scalars (status, comments,
+	pickerStatus, picking, ...). Body is a dict — keys absent are left
+	untouched, keys present (even with null values) overwrite Wave's state.
+	"""
+	if not base_url:
+		raise WaveOutboundError("Wave API base URL is not configured.")
+	if not api_key:
+		raise WaveOutboundError("Wave API key is not configured.")
+	if not app_id:
+		raise WaveOutboundError("Wave App ID is not configured.")
+	if not order_id:
+		raise WaveOutboundError("order_id is required.")
+	if not isinstance(body, dict) or not body:
+		raise WaveOutboundError("PATCH order top-level body must be a non-empty dict.")
+
+	url = f"{base_url.rstrip('/')}/api/v3/admin/orders/{order_id}"
+	headers = _build_headers(api_key, app_id)
+
+	try:
+		response = requests.patch(url, json=body, headers=headers, timeout=timeout)
+	except requests.RequestException as exc:
+		raise WaveOutboundError(f"network error calling Wave admin order PATCH: {exc}") from exc
+
+	_raise_for_response(response, "admin order PATCH")
+	return _parse_json(response)
+
+
 def get_product_by_sku(
 	*,
 	base_url: str,
