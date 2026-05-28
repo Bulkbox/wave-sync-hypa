@@ -33,10 +33,15 @@ def _pl(
 	locations: list[dict] | None = None,
 	wave_order_id: str = "",
 	name: str = "PICK-2026-0001",
+	amended_from: str | None = None,
 ) -> SimpleNamespace:
 	"""Fabricate a Pick List stand-in with .doctype, .name, .get(), .wave_order_id."""
 	doc = SimpleNamespace(doctype="Pick List", name=name, wave_order_id=wave_order_id)
-	values = {"wave_order_id": wave_order_id, "locations": locations or []}
+	values = {
+		"wave_order_id": wave_order_id,
+		"locations": locations or [],
+		"amended_from": amended_from,
+	}
 
 	def _get(key, default=None):
 		return values.get(key, default)
@@ -340,3 +345,52 @@ class TestAfterPickListInsert(FrappeTestCase):
 		)
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pl_handler.STEP_BATCH_IDS_IDENTIFIER_FAILED, steps)
+
+
+class TestAmendPickerStateResetFence(FrappeTestCase):
+	"""EXPERIMENTAL (issue #113): the amend-only fenced block in after_pick_list_insert.
+
+	Confirms the picker-state-reset entry point is called when (and only when)
+	`amended_from` is set on the Pick List. The worker itself is covered by
+	test_pick_list_amend_resetter.py.
+	"""
+
+	def test_amended_pl_invokes_enqueue_picker_state_reset(self):
+		doc = _pl(
+			locations=[_row("SO-001", item_code="JTD011", batch_no="B-001")],
+			amended_from="PICK-OLD-1",
+		)
+		from wave_sync_hypa.wave_sync_hypa.services import pick_list_amend_resetter as resetter
+
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=0)),
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(order_status, "dispatch_with_wave_order_ids"),
+			patch.object(resetter, "enqueue_picker_state_reset") as mock_reset,
+			patch.object(pl_handler, "log_step"),
+		):
+			pl_handler.after_pick_list_insert(doc)
+
+		mock_reset.assert_called_once()
+		args, _ = mock_reset.call_args
+		self.assertIs(args[0], doc)
+		self.assertEqual(args[1], [WAVE_ID_A])
+
+	def test_fresh_pl_does_not_invoke_picker_state_reset(self):
+		"""No amended_from -> the experimental block is skipped entirely."""
+		doc = _pl(
+			locations=[_row("SO-001", item_code="JTD011", batch_no="B-001")],
+			amended_from=None,
+		)
+		from wave_sync_hypa.wave_sync_hypa.services import pick_list_amend_resetter as resetter
+
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=0)),
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
+			patch.object(order_status, "dispatch_with_wave_order_ids"),
+			patch.object(resetter, "enqueue_picker_state_reset") as mock_reset,
+			patch.object(pl_handler, "log_step"),
+		):
+			pl_handler.after_pick_list_insert(doc)
+
+		mock_reset.assert_not_called()
