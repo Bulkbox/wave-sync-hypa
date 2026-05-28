@@ -76,6 +76,9 @@ class TestStampWaveOrderId(FrappeTestCase):
 		doc = _pe(references=[_ref("Sales Invoice", "SI-001"), _ref("Sales Order", "SO-002")])
 
 		def _gv(*args, **kwargs):
+			# Friendly-id lookup uses a dict filter; skip that here.
+			if args[2] != "wave_order_id" or not isinstance(args[1], str):
+				return None
 			return {("Sales Invoice", "SI-001"): WAVE_ID_A,
 				("Sales Order", "SO-002"): WAVE_ID_B}.get((args[0], args[1]))
 
@@ -92,6 +95,44 @@ class TestStampWaveOrderId(FrappeTestCase):
 		]
 		self.assertEqual(len(warnings), 1)
 		self.assertEqual(warnings[0].kwargs["request_body"]["wave_order_ids"], [WAVE_ID_A, WAVE_ID_B])
+
+	def test_stamps_wave_friendly_id_from_source_so(self):
+		"""After stamping wave_order_id, the handler also stamps wave_friendly_id from the SO."""
+		doc = _pe(references=[_ref("Sales Invoice", "SI-001")])
+
+		def _gv(*args, **kwargs):
+			# pe_references walks Sales Invoice -> wave_order_id; we also need the
+			# subsequent wave_friendly_id lookup against Sales Order.
+			if args[2] == "wave_order_id":
+				return WAVE_ID_A
+			if args[2] == "wave_friendly_id":
+				return "10000099" if isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A else None
+			return None
+
+		with (
+			patch.object(frappe.db, "get_value", side_effect=_gv),
+			patch.object(pe_handler, "log_step"),
+		):
+			pe_handler.stamp_wave_order_id(doc)
+
+		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
+		self.assertEqual(doc.wave_friendly_id, "10000099")
+
+	def test_friendly_id_defaults_to_empty_when_so_lacks_one(self):
+		"""SO exists but has no wave_friendly_id stamped -> friendly_id on the doc is ''."""
+		doc = _pe(references=[_ref("Sales Invoice", "SI-001")])
+
+		def _gv(*args, **kwargs):
+			return WAVE_ID_A if args[2] == "wave_order_id" else None
+
+		with (
+			patch.object(frappe.db, "get_value", side_effect=_gv),
+			patch.object(pe_handler, "log_step"),
+		):
+			pe_handler.stamp_wave_order_id(doc)
+
+		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
+		self.assertEqual(doc.wave_friendly_id, "")
 
 	def test_no_op_for_journal_entry_only_refs(self):
 		"""Refs to non-Wave doctypes (Journal Entry, etc.) leave the field untouched."""

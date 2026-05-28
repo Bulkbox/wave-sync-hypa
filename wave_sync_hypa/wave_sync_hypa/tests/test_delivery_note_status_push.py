@@ -77,9 +77,11 @@ class TestStampWaveOrderId(FrappeTestCase):
 		doc = _dn(items=[_item("SO-001"), _item("SO-002")])
 
 		def _by_so(*args, **kwargs):
-			# args are ("Sales Order", so_name, "wave_order_id")
-			so_name = args[1]
-			return {"SO-001": WAVE_ID_A, "SO-002": WAVE_ID_B}.get(so_name)
+			# args are (doctype, key, fieldname). The stamping handler also fires a follow-up
+			# friendly-id lookup whose key is a dict; ignore that branch here.
+			if args[2] != "wave_order_id" or not isinstance(args[1], str):
+				return None
+			return {"SO-001": WAVE_ID_A, "SO-002": WAVE_ID_B}.get(args[1])
 
 		with (
 			patch.object(frappe.db, "get_value", side_effect=_by_so),
@@ -107,6 +109,44 @@ class TestStampWaveOrderId(FrappeTestCase):
 
 		self.assertEqual(doc.wave_order_id, "")
 		mock_log.assert_not_called()
+
+	def test_stamps_wave_friendly_id_from_source_so(self):
+		"""After stamping wave_order_id, the handler also stamps wave_friendly_id from the SO."""
+		doc = _dn(items=[_item("SO-001")])
+
+		def _gv(*args, **kwargs):
+			# args = (doctype, key, fieldname)
+			if args[2] == "wave_order_id":
+				return WAVE_ID_A
+			if args[2] == "wave_friendly_id":
+				return "10000099" if isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A else None
+			return None
+
+		with (
+			patch.object(frappe.db, "get_value", side_effect=_gv),
+			patch.object(dn_handler, "log_step"),
+		):
+			dn_handler.stamp_wave_order_id(doc)
+
+		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
+		self.assertEqual(doc.wave_friendly_id, "10000099")
+
+	def test_friendly_id_defaults_to_empty_when_so_lacks_one(self):
+		"""SO exists but has no wave_friendly_id stamped -> friendly_id on the doc is ''."""
+		doc = _dn(items=[_item("SO-001")])
+
+		def _gv(*args, **kwargs):
+			# Item-walk lookup returns the wave id; friendly-id lookup returns None.
+			return WAVE_ID_A if args[2] == "wave_order_id" else None
+
+		with (
+			patch.object(frappe.db, "get_value", side_effect=_gv),
+			patch.object(dn_handler, "log_step"),
+		):
+			dn_handler.stamp_wave_order_id(doc)
+
+		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
+		self.assertEqual(doc.wave_friendly_id, "")
 
 
 class TestOnDeliveryNoteSubmit(FrappeTestCase):
