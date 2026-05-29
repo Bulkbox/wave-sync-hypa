@@ -28,6 +28,24 @@ Pre-commit is configured to use the following tools for checking and formatting 
 - prettier
 - pyupgrade
 
+### Tests
+
+The suite is split into two subpackages:
+
+- `tests/unit/` — pure-mock tests (~1.5s). The dev-loop runner.
+- `tests/integration/` — handler-driven / DB-touching tests (~10 min). Run before push.
+
+```bash
+# Dev loop — fast feedback while iterating
+bench --site dev.bulkbox.cloud run-tests --app wave_sync_hypa \
+    --module wave_sync_hypa.wave_sync_hypa.tests.unit
+
+# Pre-push — full sweep across both subpackages
+bench --site dev.bulkbox.cloud run-tests --app wave_sync_hypa
+```
+
+See `CONTRIBUTING.md` for the classification rule (when a new test belongs in `unit/` vs `integration/`) and the one-line `__init__.py` step required after adding any test file.
+
 ### CI
 
 This app can use GitHub Actions for CI. The following workflows are configured:
