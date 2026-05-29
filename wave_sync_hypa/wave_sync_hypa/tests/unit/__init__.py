@@ -31,6 +31,7 @@ from .test_money import *  # noqa: F401, F403
 from .test_order_status_push import *  # noqa: F401, F403
 from .test_payment_entry_status_push import *  # noqa: F401, F403
 from .test_payment_metadata_intake import *  # noqa: F401, F403
+from .test_payment_status_pusher import *  # noqa: F401, F403
 from .test_payment_status_resolver import *  # noqa: F401, F403
 from .test_payment_validator import *  # noqa: F401, F403
 from .test_pick_list_amend_resetter import *  # noqa: F401, F403
@@ -44,6 +45,7 @@ from .test_sales_invoice_status_push import *  # noqa: F401, F403
 from .test_sales_order_amend import *  # noqa: F401, F403
 from .test_sales_order_auto_push import *  # noqa: F401, F403
 from .test_sales_order_validation import *  # noqa: F401, F403
+from .test_shipday_intercept import *  # noqa: F401, F403
 from .test_shipping_back_calc import *  # noqa: F401, F403
 from .test_stock_resync import *  # noqa: F401, F403
 from .test_stock_sync import *  # noqa: F401, F403
