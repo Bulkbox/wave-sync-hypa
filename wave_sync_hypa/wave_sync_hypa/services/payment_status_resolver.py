@@ -1,18 +1,29 @@
-"""Decide COMPLETED vs PAYMENT_PENDING for one Wave order touched by a Payment Entry.
+"""Decide whether to push Wave's `paymentStatus = "COMPLETED"` from a Payment Entry.
 
-A PE can settle multiple Sales Invoices and/or Sales Orders across several
-Wave orders. For each Wave order we look at the PE's references that target
-that order and ask: are all of those docs fully settled now?
+Companion to the PE -> Wave outbound pipeline. The PE handler asks this
+resolver, per Wave order, "is this Wave order now fully settled?" and the
+resolver answers with either:
 
-  * Every linked SI's post-submit outstanding_amount < 0.01   -> COMPLETED
-  * Otherwise                                                  -> PAYMENT_PENDING
+  * `"COMPLETED"` -> push `paymentStatus = COMPLETED` to Wave.
+  * `None`         -> push nothing (partial / zero / unresolvable).
 
-When the PE references Sales Orders directly (no SI exists yet — direct-on-SO
-payment), fall back to comparing SO.advance_paid against SO.grand_total with
-the same 1-cent tolerance. Mixed cases (some SI refs + some SO refs for the
-same Wave order) require BOTH legs to be settled before reporting COMPLETED.
+`None` is intentionally distinct from `"PENDING"`. Wave already stamps
+`paymentStatus` at intake (COD -> PENDING, prepaid -> COMPLETED via the
+gateway), so re-pushing PENDING is either a no-op (COD) or *reverts*
+Wave's state (prepaid). The resolver therefore reports "nothing to say"
+for any state that isn't a fresh full-settlement signal.
 
-Pure: only `frappe.db.get_value` reads, no writes, no logging — easy to test.
+Three payment levels map naturally:
+
+  * Zero (paid_amount=0)              -> outstanding unchanged -> `None`
+  * Partial (cumulative paid < total) -> `outstanding >= 0.01`  -> `None`
+  * Full   (cumulative paid >= total) -> `outstanding < 0.01`   -> `"COMPLETED"`
+
+Cumulative settlement is already correctly handled by ERPNext's
+`SI.outstanding_amount` and `SO.advance_paid` running totals — no
+per-PE bookkeeping needed here.
+
+Pure: only `frappe.db.get_value` reads, no writes, no logging.
 """
 
 from __future__ import annotations
@@ -24,19 +35,18 @@ import frappe
 FULL_PAYMENT_TOLERANCE = 0.01
 
 STATUS_COMPLETED = "COMPLETED"
-STATUS_PAYMENT_PENDING = "PAYMENT_PENDING"
 
 
-def resolve_status_for_wave_order(pe_doc, wave_order_id: str) -> str:
-	"""Return COMPLETED if every PE reference for this wave_order_id is fully settled, else PAYMENT_PENDING."""
+def resolve_status_for_wave_order(pe_doc, wave_order_id: str) -> str | None:
+	"""Return "COMPLETED" if every PE reference for this wave_order_id is fully settled, else None."""
 	si_names, so_names = _references_for_wave_order(pe_doc, wave_order_id)
 	if not si_names and not so_names:
-		# No identifiable settlement target for this Wave order — be conservative.
-		return STATUS_PAYMENT_PENDING
+		# No identifiable settlement target for this Wave order -> nothing to communicate.
+		return None
 	if si_names and not _all_si_fully_paid(si_names):
-		return STATUS_PAYMENT_PENDING
+		return None
 	if so_names and not _all_so_fully_advance_paid(so_names):
-		return STATUS_PAYMENT_PENDING
+		return None
 	return STATUS_COMPLETED
 
 
