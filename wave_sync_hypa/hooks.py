@@ -209,10 +209,14 @@ fixtures = [
 
 # Overriding Methods
 # ------------------------------
-#
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "wave_sync_hypa.event.get_events"
-# }
+
+# Re-route order_stage_tracker's Shipday endpoint through our wrapper so we
+# can push Wave COMPLETED on Delivered without modifying their app. n8n keeps
+# hitting the same URL; the wrapper calls upstream first then dispatches.
+override_whitelisted_methods = {
+	"order_stage_tracker.utils.shipday_update_order_stage.order_stage":
+		"wave_sync_hypa.wave_sync_hypa.api.shipday_intercept.order_stage",
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
