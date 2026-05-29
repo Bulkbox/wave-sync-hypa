@@ -78,7 +78,8 @@ class TestStampWaveOrderId(FrappeTestCase):
 			si_handler.stamp_wave_order_id(doc)
 
 		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
-		mock_get.assert_called_once_with("Sales Order", "SO-001", "wave_order_id")
+		# First call must be the item-walk lookup; subsequent calls (e.g. wave_friendly_id) are fine.
+		self.assertEqual(mock_get.call_args_list[0].args, ("Sales Order", "SO-001", "wave_order_id"))
 		mock_log.assert_not_called()
 
 	def test_falls_back_to_delivery_note_link(self):
@@ -98,13 +99,51 @@ class TestStampWaveOrderId(FrappeTestCase):
 
 		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
 
+	def test_stamps_wave_friendly_id_from_source_so(self):
+		"""After stamping wave_order_id, the handler also stamps wave_friendly_id from the SO."""
+		doc = _si(items=[_item(sales_order="SO-001")])
+
+		def _gv(*args, **kwargs):
+			if args[2] == "wave_order_id":
+				return WAVE_ID_A
+			if args[2] == "wave_friendly_id":
+				return "10000099" if isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A else None
+			return None
+
+		with (
+			patch.object(frappe.db, "get_value", side_effect=_gv),
+			patch.object(si_handler, "log_step"),
+		):
+			si_handler.stamp_wave_order_id(doc)
+
+		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
+		self.assertEqual(doc.wave_friendly_id, "10000099")
+
+	def test_friendly_id_defaults_to_empty_when_so_lacks_one(self):
+		"""SO exists but has no wave_friendly_id stamped -> friendly_id on the doc is ''."""
+		doc = _si(items=[_item(sales_order="SO-001")])
+
+		def _gv(*args, **kwargs):
+			return WAVE_ID_A if args[2] == "wave_order_id" else None
+
+		with (
+			patch.object(frappe.db, "get_value", side_effect=_gv),
+			patch.object(si_handler, "log_step"),
+		):
+			si_handler.stamp_wave_order_id(doc)
+
+		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
+		self.assertEqual(doc.wave_friendly_id, "")
+
 	def test_multi_source_warns_and_stamps_first(self):
 		"""SI bridging two Wave SOs -> first stamped, Warning row enumerates both."""
 		doc = _si(items=[_item(sales_order="SO-001"), _item(sales_order="SO-002")])
 
 		def _by_so(*args, **kwargs):
-			so_name = args[1]
-			return {"SO-001": WAVE_ID_A, "SO-002": WAVE_ID_B}.get(so_name)
+			# Friendly-id lookup uses a dict filter; skip that here.
+			if args[2] != "wave_order_id" or not isinstance(args[1], str):
+				return None
+			return {"SO-001": WAVE_ID_A, "SO-002": WAVE_ID_B}.get(args[1])
 
 		with (
 			patch.object(frappe.db, "get_value", side_effect=_by_so),

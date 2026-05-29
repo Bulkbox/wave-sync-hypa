@@ -12,9 +12,10 @@ Behaviour, applied to every PE submission:
     references = []) are unaffected.
   * Mixed prepaid + COD references in one PE -> hard block. Reconciliation
     becomes ambiguous; the user has confirmed split-into-two is the answer.
-  * Prepaid PE without a Sales Invoice reference -> hard block. The user wants
-    COMPLETED to be pushed only after the SI exists, so the accountant must
-    add the SI to references[] before submitting.
+  * Prepaid PE without a Sales Invoice reference -> hard block. Accounting
+    invariant: a prepaid PE must settle a real Sales Invoice (not float as
+    an unallocated draft). The accountant must add the SI to references[]
+    before submitting.
   * Prepaid PE with amount divergence (>= FULL_PAYMENT_TOLERANCE) -> hard block.
   * Prepaid PE with MOP differing from the mapping table -> Warning, not block.
     The current n8n flow hardcodes `MPESA` on every iPay PE; we don't want to

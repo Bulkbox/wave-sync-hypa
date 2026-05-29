@@ -1,8 +1,10 @@
 """Unit tests for payment_status_resolver.resolve_status_for_wave_order.
 
-Covers SI-only, SO-only, and mixed reference cases plus the no-match branch.
-All `frappe.db.get_value` calls are patched so each test stays focused on
-the resolver's classification logic.
+Resolver now returns "COMPLETED" on full settlement, None for partial /
+zero / unresolvable (caller skips the Wave push on None). Tests cover
+SI-only, SO-only, mixed-reference, no-match, and the explicit zero-amount
+edge case. All `frappe.db.get_value` calls are patched so each test stays
+focused on the resolver's classification logic.
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ def _gv_factory(
 	wave_order_ids = wave_order_ids or {}
 
 	def _gv(*args, **kwargs):
-		# Resolver uses two shapes:
+		# Resolver uses these shapes:
 		#   frappe.db.get_value(doctype, name, "wave_order_id")
 		#   frappe.db.get_value("Sales Invoice", name, "outstanding_amount")
 		#   frappe.db.get_value("Sales Order", name, ["grand_total", "advance_paid"], as_dict=True)
@@ -61,7 +63,7 @@ def _gv_factory(
 
 
 class TestResolveStatusForWaveOrder(FrappeTestCase):
-	"""Pure resolver: classify based on outstanding_amount / advance_paid."""
+	"""Pure resolver: COMPLETED on full settlement, None otherwise."""
 
 	def test_returns_completed_when_only_si_refs_and_outstanding_zero(self):
 		doc = _pe([_ref("Sales Invoice", "SI-001")])
@@ -73,7 +75,8 @@ class TestResolveStatusForWaveOrder(FrappeTestCase):
 			result = payment_status_resolver.resolve_status_for_wave_order(doc, WAVE_ID_A)
 		self.assertEqual(result, payment_status_resolver.STATUS_COMPLETED)
 
-	def test_returns_payment_pending_when_any_linked_si_still_outstanding(self):
+	def test_returns_none_when_any_linked_si_still_outstanding(self):
+		"""Partial settlement (one SI fully paid, the other still outstanding) -> None."""
 		doc = _pe([_ref("Sales Invoice", "SI-001"), _ref("Sales Invoice", "SI-002")])
 		gv = _gv_factory(
 			wave_order_ids={
@@ -84,7 +87,18 @@ class TestResolveStatusForWaveOrder(FrappeTestCase):
 		)
 		with patch.object(frappe.db, "get_value", side_effect=gv):
 			result = payment_status_resolver.resolve_status_for_wave_order(doc, WAVE_ID_A)
-		self.assertEqual(result, payment_status_resolver.STATUS_PAYMENT_PENDING)
+		self.assertIsNone(result)
+
+	def test_returns_none_for_zero_amount_pe_against_outstanding_si(self):
+		"""Zero-amount PE: SI's outstanding_amount is unchanged (still equals invoice total) -> None."""
+		doc = _pe([_ref("Sales Invoice", "SI-001")])
+		gv = _gv_factory(
+			wave_order_ids={("Sales Invoice", "SI-001"): WAVE_ID_A},
+			si_outstanding={"SI-001": 250.00},  # unchanged after a zero PE
+		)
+		with patch.object(frappe.db, "get_value", side_effect=gv):
+			result = payment_status_resolver.resolve_status_for_wave_order(doc, WAVE_ID_A)
+		self.assertIsNone(result)
 
 	def test_returns_completed_when_only_so_refs_fully_advance_paid(self):
 		doc = _pe([_ref("Sales Order", "SO-001")])
@@ -96,7 +110,7 @@ class TestResolveStatusForWaveOrder(FrappeTestCase):
 			result = payment_status_resolver.resolve_status_for_wave_order(doc, WAVE_ID_A)
 		self.assertEqual(result, payment_status_resolver.STATUS_COMPLETED)
 
-	def test_returns_payment_pending_when_so_advance_short(self):
+	def test_returns_none_when_so_advance_short(self):
 		doc = _pe([_ref("Sales Order", "SO-001")])
 		gv = _gv_factory(
 			wave_order_ids={("Sales Order", "SO-001"): WAVE_ID_A},
@@ -104,10 +118,10 @@ class TestResolveStatusForWaveOrder(FrappeTestCase):
 		)
 		with patch.object(frappe.db, "get_value", side_effect=gv):
 			result = payment_status_resolver.resolve_status_for_wave_order(doc, WAVE_ID_A)
-		self.assertEqual(result, payment_status_resolver.STATUS_PAYMENT_PENDING)
+		self.assertIsNone(result)
 
 	def test_mixed_si_and_so_refs_require_both_legs_settled(self):
-		"""SI fully paid but SO advance short => still PAYMENT_PENDING."""
+		"""SI fully paid but SO advance short -> still None."""
 		doc = _pe([_ref("Sales Invoice", "SI-001"), _ref("Sales Order", "SO-001")])
 		gv = _gv_factory(
 			wave_order_ids={
@@ -119,10 +133,10 @@ class TestResolveStatusForWaveOrder(FrappeTestCase):
 		)
 		with patch.object(frappe.db, "get_value", side_effect=gv):
 			result = payment_status_resolver.resolve_status_for_wave_order(doc, WAVE_ID_A)
-		self.assertEqual(result, payment_status_resolver.STATUS_PAYMENT_PENDING)
+		self.assertIsNone(result)
 
-	def test_returns_payment_pending_when_no_matching_refs_for_wave_order(self):
-		"""PE has refs but none target the queried wave_order_id -> PAYMENT_PENDING (conservative)."""
+	def test_returns_none_when_no_matching_refs_for_wave_order(self):
+		"""PE has refs but none target the queried wave_order_id -> None."""
 		doc = _pe([_ref("Sales Invoice", "SI-001")])
 		gv = _gv_factory(
 			wave_order_ids={("Sales Invoice", "SI-001"): WAVE_ID_B},
@@ -130,7 +144,7 @@ class TestResolveStatusForWaveOrder(FrappeTestCase):
 		)
 		with patch.object(frappe.db, "get_value", side_effect=gv):
 			result = payment_status_resolver.resolve_status_for_wave_order(doc, WAVE_ID_A)
-		self.assertEqual(result, payment_status_resolver.STATUS_PAYMENT_PENDING)
+		self.assertIsNone(result)
 
 	def test_filters_refs_to_only_those_carrying_the_target_wave_order_id(self):
 		"""Mixed-target PE: only the wave_order_id under test is consulted."""
@@ -152,7 +166,6 @@ class TestResolveStatusForWaveOrder(FrappeTestCase):
 				payment_status_resolver.STATUS_COMPLETED,
 			)
 			# wave-B has the outstanding SI-B.
-			self.assertEqual(
+			self.assertIsNone(
 				payment_status_resolver.resolve_status_for_wave_order(doc, WAVE_ID_B),
-				payment_status_resolver.STATUS_PAYMENT_PENDING,
 			)
