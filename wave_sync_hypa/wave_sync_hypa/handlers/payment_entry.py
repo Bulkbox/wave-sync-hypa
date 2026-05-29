@@ -1,36 +1,44 @@
-"""Payment Entry hooks: stamp wave_order_id and push the computed status to Wave.
+"""Payment Entry hooks: stamp wave_order_id and push Wave's paymentStatus on submit.
 
 Wired in hooks.py:
 
-  Payment Entry.validate    -> stamp_wave_order_id
-  Payment Entry.on_submit   -> on_payment_entry_submit
+  Payment Entry.validate       -> stamp_wave_order_id
+  Payment Entry.before_submit  -> validate_payment_before_submit
+  Payment Entry.on_submit      -> on_payment_entry_submit
 
 A Payment Entry can settle multiple Sales Invoices and/or Sales Orders via
 its `references` child table. Each row carries (reference_doctype,
 reference_name); both Sales Invoice and Sales Order have the wave_order_id
 Custom Field, so we walk the references, dereference each one's
-wave_order_id, dedupe in encounter order, and dispatch one push per distinct
-Wave order.
+wave_order_id, dedupe in encounter order, and dispatch one paymentStatus
+push per distinct Wave order that is now fully settled.
 
-Status decision is computed (full vs partial settlement) and so cannot be
-expressed in the rule schema's row-level field equality. We use the same
-forced_payload escape hatch the credit-note classifier uses, with the
-status string coming from payment_status_resolver. Each Wave order may
-land on a different status (one fully paid, another partial), so we
-dispatch per-Wave-order rather than fanning out a single payload.
+PE submit drives Wave's `paymentStatus` field only — NOT the order
+lifecycle `status` field. Order lifecycle progression lives elsewhere
+(DN submit -> INVOICING, SI submit -> UNDER_DELIVERY, Shipday delivered
+-> COMPLETED, full credit note -> CANCELLED). Conflating "paid" with
+"delivered" was the old shape; this handler now owns just the payment
+half of the contract.
 
-Refunds (payment_type=Pay) are skipped at the handler level — they don't
-correspond to a Wave-meaningful state transition. Cancellation of a PE is
-intentionally NOT wired: COMPLETED is terminal in Wave's enum, and any
-backward jump is rejected (ORDER0049, soft-skipped).
+The resolver returns "COMPLETED" for full settlement, None for partial /
+zero / unresolvable. None means "nothing to communicate" — Wave's
+paymentStatus already starts at PENDING (COD) or COMPLETED (prepaid) at
+intake, so re-pushing PENDING is either a no-op or a wrong revert.
+
+Refunds (payment_type=Pay) are skipped at the handler level. Cancellation
+of a PE is intentionally NOT wired; an explicit follow-up will design
+payment-status retraction if and when that's needed.
 """
 
 from __future__ import annotations
 
 import frappe
 
-from wave_sync_hypa.wave_sync_hypa.handlers import order_status
-from wave_sync_hypa.wave_sync_hypa.services import payment_status_resolver, payment_validator
+from wave_sync_hypa.wave_sync_hypa.services import (
+	payment_status_pusher,
+	payment_status_resolver,
+	payment_validator,
+)
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.pe_references import (
@@ -39,6 +47,7 @@ from wave_sync_hypa.wave_sync_hypa.services.pe_references import (
 
 STEP_STAMP_MULTI_SOURCE = "payment_entry_wave_order_id_multi_source"
 STEP_SKIPPED_PAYMENT_TYPE = "payment_entry_skipped_non_receive_payment_type"
+STEP_SKIPPED_PARTIAL_OR_ZERO = "payment_status_push_skipped_partial_or_zero"
 
 
 def stamp_wave_order_id(doc, method=None) -> None:
@@ -75,7 +84,13 @@ def stamp_wave_order_id(doc, method=None) -> None:
 
 
 def on_payment_entry_submit(doc, method=None) -> None:
-	"""on_submit hook: per Wave order, compute COMPLETED vs PAYMENT_PENDING and dispatch."""
+	"""on_submit hook: per Wave order, push paymentStatus=COMPLETED only when fully settled.
+
+	Resolver returns "COMPLETED" or None per Wave order. None means partial /
+	zero / unresolvable — Wave's existing paymentStatus stays as stamped at
+	intake (no push). Fully-settled Wave orders get one PATCH each, fanned
+	out via the async pusher.
+	"""
 	if (doc.get("payment_type") or "").strip() != "Receive":
 		log_step(
 			correlation_id=new_correlation_id(),
@@ -86,7 +101,7 @@ def on_payment_entry_submit(doc, method=None) -> None:
 			linked_docname=doc.name,
 			error_message=(
 				f"Payment Entry payment_type={doc.get('payment_type')!r}; only 'Receive' "
-				"PEs push status to Wave (refunds are out of scope)."
+				"PEs push to Wave (refunds are out of scope)."
 			),
 		)
 		return
@@ -94,13 +109,25 @@ def on_payment_entry_submit(doc, method=None) -> None:
 	wave_ids = _collect_distinct_wave_order_ids(doc)
 	if not wave_ids and doc.get("wave_order_id"):
 		wave_ids = [doc.wave_order_id]
+	correlation_id = new_correlation_id()
 	for wave_order_id in wave_ids:
 		status = payment_status_resolver.resolve_status_for_wave_order(doc, wave_order_id)
-		order_status.dispatch_with_wave_order_ids(
-			doc,
-			"submit",
-			[wave_order_id],
-			forced_payload={"status": status},
+		if status is None:
+			log_step(
+				correlation_id=correlation_id,
+				step=STEP_SKIPPED_PARTIAL_OR_ZERO,
+				level="Info",
+				doc_type=doc.doctype,
+				linked_doctype=doc.doctype,
+				linked_docname=doc.name,
+				wave_id=wave_order_id,
+				error_message=(
+					"Settlement is partial / zero / unresolvable; not pushing paymentStatus to Wave."
+				),
+			)
+			continue
+		payment_status_pusher.enqueue_payment_status_push(
+			doc, wave_order_id, status, correlation_id=correlation_id,
 		)
 
 
