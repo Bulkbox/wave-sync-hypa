@@ -64,7 +64,7 @@
    "label": "Integration"
   },
   {
-   "default": "1",
+   "default": "0",
    "description": "Master kill-switch. When off, the webhook endpoint returns 503 and no outbound calls are made.",
    "fieldname": "enabled",
    "fieldtype": "Check",
