@@ -37,13 +37,22 @@ def _upstream_result(new_stage: str, sales_order: str = DUMMY_SO) -> dict:
 class TestShipdayInterceptOrderStage(FrappeTestCase):
 	"""Wrapper contract: upstream-first, conditional Wave push, never break upstream."""
 
+	def setUp(self):
+		# Hold the master kill switch open so these tests exercise the wrapper's
+		# upstream-first / conditional-dispatch contract; the disabled-path
+		# (upstream still runs, Wave push skipped) is covered in
+		# test_master_switch.TestDecisionLayerSkipsEnqueueWhenMasterOff.
+		guard = patch.object(shipday_intercept, "skip_if_disabled", return_value=False)
+		guard.start()
+		self.addCleanup(guard.stop)
+
 	def test_delivered_with_wave_order_id_dispatches_completed(self):
 		"""Delivered + SO has wave_order_id -> dispatch fires with forced COMPLETED."""
 		expected = _upstream_result("Delivered")
 		with (
 			patch.object(shipday_intercept, "_upstream_order_stage", return_value=expected) as mock_up,
 			patch.object(frappe.db, "get_value", return_value=WAVE_ID),
-			patch.object(frappe, "get_doc") as mock_get_doc,
+			patch.object(frappe, "get_doc"),
 			patch.object(order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
 			patch.object(shipday_intercept, "log_step") as mock_log,
 		):
@@ -123,10 +132,7 @@ class TestShipdayInterceptOrderStage(FrappeTestCase):
 		# Upstream return value preserved intact.
 		self.assertEqual(result, expected)
 		# Error audit row written.
-		failed = [
-			c for c in mock_log.call_args_list
-			if c.kwargs.get("step") == shipday_intercept.STEP_FAILED
-		]
+		failed = [c for c in mock_log.call_args_list if c.kwargs.get("step") == shipday_intercept.STEP_FAILED]
 		self.assertEqual(len(failed), 1)
 		self.assertEqual(failed[0].kwargs.get("level"), "Error")
 

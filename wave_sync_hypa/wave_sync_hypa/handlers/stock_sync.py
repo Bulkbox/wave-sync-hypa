@@ -15,6 +15,7 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
 
 STEP_SKIPPED_DISABLED = "stock_sync_skipped_disabled"
 STEP_SKIPPED_OTHER_WAREHOUSE = "stock_sync_skipped_other_warehouse"
@@ -32,6 +33,14 @@ def on_sle_submit(doc, method=None) -> None:
 	correlation_id = new_correlation_id()
 	item_code = doc.get("item_code")
 	warehouse = doc.get("warehouse")
+
+	if skip_if_disabled(
+		correlation_id,
+		doc_type="Stock Ledger Entry",
+		linked_doctype="Stock Ledger Entry",
+		linked_docname=doc.name,
+	):
+		return
 
 	if not item_code:
 		log_step(

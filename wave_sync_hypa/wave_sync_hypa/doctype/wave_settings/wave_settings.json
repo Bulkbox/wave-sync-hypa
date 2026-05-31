@@ -65,7 +65,7 @@
   },
   {
    "default": "0",
-   "description": "Master kill-switch. When off, the webhook endpoint returns 503 and no outbound calls are made.",
+   "description": "Master kill-switch for the whole integration. When off, inbound webhooks are still received, authenticated and logged, then acknowledged with HTTP 200 (so Wave does not retry) with the payload kept for replay - but nothing is enqueued, no outbound call is made to Wave, and no ERP record is changed as a result.",
    "fieldname": "enabled",
    "fieldtype": "Check",
    "label": "Integration Enabled"

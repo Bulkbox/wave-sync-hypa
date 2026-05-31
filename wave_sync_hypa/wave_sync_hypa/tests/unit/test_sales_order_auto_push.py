@@ -22,6 +22,7 @@ def _settings(*, push_enabled: int = 1) -> MagicMock:
 	"""Wave Settings stand-in carrying only the auto-push kill-switch."""
 	settings = MagicMock(name="WaveSettings")
 	settings.get.side_effect = lambda key, default=None: {
+		"enabled": 1,
 		"erp_to_wave_push_enabled": push_enabled,
 	}.get(key, default)
 	return settings

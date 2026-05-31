@@ -79,8 +79,9 @@ class TestStampWaveOrderId(FrappeTestCase):
 			# Friendly-id lookup uses a dict filter; skip that here.
 			if args[2] != "wave_order_id" or not isinstance(args[1], str):
 				return None
-			return {("Sales Invoice", "SI-001"): WAVE_ID_A,
-				("Sales Order", "SO-002"): WAVE_ID_B}.get((args[0], args[1]))
+			return {("Sales Invoice", "SI-001"): WAVE_ID_A, ("Sales Order", "SO-002"): WAVE_ID_B}.get(
+				(args[0], args[1])
+			)
 
 		with (
 			patch.object(frappe.db, "get_value", side_effect=_gv),
@@ -90,8 +91,7 @@ class TestStampWaveOrderId(FrappeTestCase):
 
 		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
 		warnings = [
-			c for c in mock_log.call_args_list
-			if c.kwargs.get("step") == pe_handler.STEP_STAMP_MULTI_SOURCE
+			c for c in mock_log.call_args_list if c.kwargs.get("step") == pe_handler.STEP_STAMP_MULTI_SOURCE
 		]
 		self.assertEqual(len(warnings), 1)
 		self.assertEqual(warnings[0].kwargs["request_body"]["wave_order_ids"], [WAVE_ID_A, WAVE_ID_B])
@@ -106,7 +106,11 @@ class TestStampWaveOrderId(FrappeTestCase):
 			if args[2] == "wave_order_id":
 				return WAVE_ID_A
 			if args[2] == "wave_friendly_id":
-				return "10000099" if isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A else None
+				return (
+					"10000099"
+					if isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A
+					else None
+				)
 			return None
 
 		with (
@@ -149,6 +153,14 @@ class TestStampWaveOrderId(FrappeTestCase):
 
 class TestOnPaymentEntrySubmit(FrappeTestCase):
 	"""on_submit: enqueue paymentStatus push only when resolver returns COMPLETED."""
+
+	def setUp(self):
+		# Hold the master kill switch open so the handler's own branching is what's
+		# under test here; the disabled-path short-circuit is covered in
+		# test_master_switch.TestDecisionLayerSkipsEnqueueWhenMasterOff.
+		guard = patch.object(pe_handler, "skip_if_disabled", return_value=False)
+		guard.start()
+		self.addCleanup(guard.stop)
 
 	def test_skipped_for_payment_type_pay(self):
 		"""Refunds (payment_type=Pay) are silently skipped at the handler."""
@@ -206,8 +218,9 @@ class TestOnPaymentEntrySubmit(FrappeTestCase):
 		doc = _pe(references=[_ref("Sales Invoice", "SI-A"), _ref("Sales Invoice", "SI-B")])
 
 		def _gv(*args, **kwargs):
-			return {("Sales Invoice", "SI-A"): WAVE_ID_A,
-				("Sales Invoice", "SI-B"): WAVE_ID_B}.get((args[0], args[1]))
+			return {("Sales Invoice", "SI-A"): WAVE_ID_A, ("Sales Invoice", "SI-B"): WAVE_ID_B}.get(
+				(args[0], args[1])
+			)
 
 		def _resolve(_pe_doc, wave_order_id):
 			return payment_status_resolver.STATUS_COMPLETED if wave_order_id == WAVE_ID_A else None
@@ -225,7 +238,8 @@ class TestOnPaymentEntrySubmit(FrappeTestCase):
 		self.assertEqual(mock_enqueue.call_args.args[1], WAVE_ID_A)
 		self.assertEqual(mock_enqueue.call_args.args[2], "COMPLETED")
 		skip_rows = [
-			c for c in mock_log.call_args_list
+			c
+			for c in mock_log.call_args_list
 			if c.kwargs.get("step") == pe_handler.STEP_SKIPPED_PARTIAL_OR_ZERO
 		]
 		self.assertEqual(len(skip_rows), 1)
