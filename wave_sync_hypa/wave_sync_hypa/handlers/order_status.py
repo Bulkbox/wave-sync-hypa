@@ -18,6 +18,7 @@ import frappe
 from wave_sync_hypa.wave_sync_hypa.services import order_status_resolver
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
 
 STEP_ENQUEUED = "order_status_push_enqueued"
 STEP_SKIPPED_DISABLED = "order_status_push_skipped_disabled"
@@ -32,9 +33,7 @@ STEP_AUTO_PUSH_SKIPPED_WAVE_ORIGIN = "erp_to_wave_auto_push_skipped_wave_origin"
 STEP_AUTO_PUSH_ENQUEUE_FAILED = "erp_to_wave_auto_push_enqueue_failed"
 
 WORKER_DOTTED_PATH = "wave_sync_hypa.wave_sync_hypa.services.order_status_pusher.push_order_status"
-WAVE_ORDER_CREATOR_DOTTED_PATH = (
-	"wave_sync_hypa.wave_sync_hypa.services.wave_order_creator.push_so_to_wave"
-)
+WAVE_ORDER_CREATOR_DOTTED_PATH = "wave_sync_hypa.wave_sync_hypa.services.wave_order_creator.push_so_to_wave"
 
 
 def on_sales_order_submit(doc, method=None) -> None:
@@ -67,15 +66,34 @@ def maybe_auto_push_to_wave(doc, method=None) -> None:
 	ToDo + Wave Sync Log path inside `push_so_to_wave`; the manual button
 	is the retry surface once the failure is fixed.
 	"""
+	if skip_if_disabled(
+		new_correlation_id(),
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name,
+	):
+		return
 	settings = frappe.get_cached_doc("Wave Settings")
 	if not settings.get("erp_to_wave_push_enabled"):
-		_log_auto_push(STEP_AUTO_PUSH_SKIPPED_DISABLED, "Info", doc, "ERP -> Wave push is disabled in Wave Settings.")
+		_log_auto_push(
+			STEP_AUTO_PUSH_SKIPPED_DISABLED, "Info", doc, "ERP -> Wave push is disabled in Wave Settings."
+		)
 		return
 	if (doc.get("wave_order_id") or "").strip():
-		_log_auto_push(STEP_AUTO_PUSH_SKIPPED_ALREADY_PUSHED, "Info", doc, f"Sales Order is already linked to Wave order {doc.wave_order_id}.")
+		_log_auto_push(
+			STEP_AUTO_PUSH_SKIPPED_ALREADY_PUSHED,
+			"Info",
+			doc,
+			f"Sales Order is already linked to Wave order {doc.wave_order_id}.",
+		)
 		return
 	if (doc.get("wave_origin") or "") == "Wave Webhook":
-		_log_auto_push(STEP_AUTO_PUSH_SKIPPED_WAVE_ORIGIN, "Info", doc, "Sales Order originated from a Wave webhook; nothing to push.")
+		_log_auto_push(
+			STEP_AUTO_PUSH_SKIPPED_WAVE_ORIGIN,
+			"Info",
+			doc,
+			"Sales Order originated from a Wave webhook; nothing to push.",
+		)
 		return
 
 	correlation_id = new_correlation_id()
@@ -165,6 +183,15 @@ def dispatch_with_wave_order_ids(
 	"""
 	correlation_id = new_correlation_id()
 	settings = frappe.get_cached_doc("Wave Settings")
+
+	if skip_if_disabled(
+		correlation_id,
+		doc_type=doc.doctype,
+		action=event,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name,
+	):
+		return
 
 	if not settings.get("outbound_order_status_sync_enabled"):
 		log_step(

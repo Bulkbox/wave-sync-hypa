@@ -27,7 +27,9 @@ WAVE_ID_A = "wave-id-aaa"
 WAVE_ID_B = "wave-id-bbb"
 
 
-def _dn(items: list[dict] | None = None, wave_order_id: str = "", name: str = "DN-2026-0001") -> SimpleNamespace:
+def _dn(
+	items: list[dict] | None = None, wave_order_id: str = "", name: str = "DN-2026-0001"
+) -> SimpleNamespace:
 	"""Fabricate a Delivery Note stand-in with .doctype, .name, .get(), and .wave_order_id."""
 	doc = SimpleNamespace(doctype="Delivery Note", name=name, wave_order_id=wave_order_id)
 	values = {"wave_order_id": wave_order_id, "items": items or []}
@@ -91,8 +93,7 @@ class TestStampWaveOrderId(FrappeTestCase):
 
 		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
 		warnings = [
-			c for c in mock_log.call_args_list
-			if c.kwargs.get("step") == dn_handler.STEP_STAMP_MULTI_SOURCE
+			c for c in mock_log.call_args_list if c.kwargs.get("step") == dn_handler.STEP_STAMP_MULTI_SOURCE
 		]
 		self.assertEqual(len(warnings), 1)
 		self.assertEqual(warnings[0].kwargs.get("level"), "Warning")
@@ -119,7 +120,11 @@ class TestStampWaveOrderId(FrappeTestCase):
 			if args[2] == "wave_order_id":
 				return WAVE_ID_A
 			if args[2] == "wave_friendly_id":
-				return "10000099" if isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A else None
+				return (
+					"10000099"
+					if isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A
+					else None
+				)
 			return None
 
 		with (
@@ -207,6 +212,7 @@ class TestDispatchFanOut(FrappeTestCase):
 		doc = _dn(items=[_item("SO-001"), _item("SO-002")])
 		settings = MagicMock()
 		settings.get.side_effect = lambda key, default=None: {
+			"enabled": 1,
 			"outbound_order_status_sync_enabled": 1,
 		}.get(key, default)
 		with (
@@ -219,9 +225,7 @@ class TestDispatchFanOut(FrappeTestCase):
 			patch.object(order_status, "_enqueue_push") as mock_enqueue,
 			patch.object(order_status, "log_step"),
 		):
-			order_status.dispatch_with_wave_order_ids(
-				doc, "submit", [WAVE_ID_A, WAVE_ID_B]
-			)
+			order_status.dispatch_with_wave_order_ids(doc, "submit", [WAVE_ID_A, WAVE_ID_B])
 
 		self.assertEqual(mock_enqueue.call_count, 2)
 		# Signature: _enqueue_push(source_doctype, source_docname, event, payload, correlation_id, wave_order_id)
@@ -237,6 +241,7 @@ class TestDispatchFanOut(FrappeTestCase):
 		doc = _dn(items=[])
 		settings = MagicMock()
 		settings.get.side_effect = lambda key, default=None: {
+			"enabled": 1,
 			"outbound_order_status_sync_enabled": 1,
 		}.get(key, default)
 		with (
@@ -255,13 +260,12 @@ class TestDispatchFanOut(FrappeTestCase):
 		doc = _dn(items=[])
 		settings = MagicMock()
 		settings.get.side_effect = lambda key, default=None: {
+			"enabled": 1,
 			"outbound_order_status_sync_enabled": 1,
 		}.get(key, default)
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(
-				order_status.order_status_resolver, "resolve_outbound_payload"
-			) as mock_resolver,
+			patch.object(order_status.order_status_resolver, "resolve_outbound_payload") as mock_resolver,
 			patch.object(order_status, "_enqueue_push") as mock_enqueue,
 			patch.object(order_status, "log_step"),
 		):

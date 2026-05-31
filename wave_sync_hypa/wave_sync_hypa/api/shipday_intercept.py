@@ -22,7 +22,6 @@ so n8n's call lands in our wrapper instead. The wrapper:
 from __future__ import annotations
 
 import frappe
-
 from order_stage_tracker.utils.shipday_update_order_stage import (
 	order_stage as _upstream_order_stage,
 )
@@ -30,6 +29,7 @@ from order_stage_tracker.utils.shipday_update_order_stage import (
 from wave_sync_hypa.wave_sync_hypa.handlers import order_status
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
 
 STAGE_DELIVERED = "Delivered"
 WAVE_STATUS_COMPLETED = "COMPLETED"
@@ -54,13 +54,23 @@ def order_stage(delivery_note: str) -> dict:
 	sales_order = ((result or {}).get("sales_order") or "").strip()
 	if not sales_order:
 		return result
-	wave_order_id = (
-		frappe.db.get_value("Sales Order", sales_order, "wave_order_id") or ""
-	).strip()
+	wave_order_id = (frappe.db.get_value("Sales Order", sales_order, "wave_order_id") or "").strip()
 	if not wave_order_id:
 		return result
 
 	correlation_id = new_correlation_id()
+	# Master kill switch: the upstream order_stage_tracker side effects above
+	# (custom_order_stage write + CS-Cart sync) belong to that app and must run
+	# regardless of Wave's state. Only the Wave COMPLETED push is ours to gate.
+	if skip_if_disabled(
+		correlation_id,
+		doc_type="Sales Order",
+		action=EVENT_SHIPDAY_DELIVERED,
+		linked_doctype="Sales Order",
+		linked_docname=sales_order,
+		wave_id=wave_order_id,
+	):
+		return result
 	try:
 		so = frappe.get_doc("Sales Order", sales_order)
 		order_status.dispatch_with_wave_order_ids(

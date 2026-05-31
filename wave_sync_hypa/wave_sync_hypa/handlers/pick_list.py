@@ -38,6 +38,7 @@ from wave_sync_hypa.wave_sync_hypa.handlers import order_status
 from wave_sync_hypa.wave_sync_hypa.services import picker_identifier
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
 
 STEP_STAMP_MULTI_SOURCE = "pick_list_wave_order_id_multi_source"
 STEP_NO_WAVE_ORDERS = "pick_list_no_wave_sourced_orders"
@@ -101,6 +102,13 @@ def stamp_wave_order_id(doc, method=None) -> None:
 
 def after_pick_list_insert(doc, method=None) -> None:
 	"""after_insert hook: route status via the rules table; batch-IDs gated by its own kill-switch."""
+	if skip_if_disabled(
+		new_correlation_id(),
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name,
+	):
+		return
 	wave_ids = _collect_distinct_wave_order_ids(doc)
 	if not wave_ids and doc.get("wave_order_id"):
 		wave_ids = [doc.wave_order_id]
@@ -139,6 +147,7 @@ def after_pick_list_insert(doc, method=None) -> None:
 		from wave_sync_hypa.wave_sync_hypa.services.pick_list_amend_resetter import (
 			enqueue_picker_state_reset,
 		)
+
 		enqueue_picker_state_reset(doc, wave_ids, settings)
 	# ================================================================
 	# END EXPERIMENTAL BLOCK
@@ -253,11 +262,13 @@ def _group_batches_by_wave_order(doc, wave_ids: list[str], settings) -> dict[str
 				continue
 			if not identifiers:
 				continue
-			entries.append({
-				"item_code": item_code,
-				"batch_ids": identifiers,
-				"comments": picker_identifier.comment_for_sku_outbound(rows),
-			})
+			entries.append(
+				{
+					"item_code": item_code,
+					"batch_ids": identifiers,
+					"comments": picker_identifier.comment_for_sku_outbound(rows),
+				}
+			)
 		if entries:
 			grouped[wave_order_id] = entries
 	return grouped
@@ -265,16 +276,12 @@ def _group_batches_by_wave_order(doc, wave_ids: list[str], settings) -> dict[str
 
 def _build_so_to_wave_map(doc) -> dict[str, str]:
 	"""One DB roundtrip per distinct Sales Order on the Pick List; map name -> wave_order_id."""
-	so_names = {
-		_row_field(row, "sales_order")
-		for row in doc.get("locations") or []
-	}
+	so_names = {_row_field(row, "sales_order") for row in doc.get("locations") or []}
 	so_names.discard("")
 	if not so_names:
 		return {}
 	return {
-		so_name: (frappe.db.get_value("Sales Order", so_name, "wave_order_id") or "")
-		for so_name in so_names
+		so_name: (frappe.db.get_value("Sales Order", so_name, "wave_order_id") or "") for so_name in so_names
 	}
 
 

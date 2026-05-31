@@ -63,6 +63,7 @@ def _row(sales_order: str | None, item_code: str = "", batch_no: str = "", qty: 
 def _settings(batch_ids_enabled: int = 0, picker_identifier_source: str = "") -> MagicMock:
 	"""Wave Settings stand-in: master toggle + picker_identifier_source mode."""
 	values = {
+		"enabled": 1,
 		"pick_list_batch_ids_push_enabled": batch_ids_enabled,
 		"picker_identifier_source": picker_identifier_source,
 	}
@@ -124,14 +125,11 @@ class TestStampWaveOrderId(FrappeTestCase):
 		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
 		self.assertEqual(doc.wave_friendly_id, "10000222")
 		warnings = [
-			c for c in mock_log.call_args_list
-			if c.kwargs.get("step") == pl_handler.STEP_STAMP_MULTI_SOURCE
+			c for c in mock_log.call_args_list if c.kwargs.get("step") == pl_handler.STEP_STAMP_MULTI_SOURCE
 		]
 		self.assertEqual(len(warnings), 1)
 		self.assertEqual(warnings[0].kwargs.get("level"), "Warning")
-		self.assertEqual(
-			warnings[0].kwargs["request_body"]["wave_order_ids"], [WAVE_ID_A, WAVE_ID_B]
-		)
+		self.assertEqual(warnings[0].kwargs["request_body"]["wave_order_ids"], [WAVE_ID_A, WAVE_ID_B])
 
 	def test_no_op_when_pick_has_no_wave_sourced_so(self):
 		doc = _pl(locations=[_row("SO-NON-WAVE"), _row(None)])
@@ -202,12 +200,14 @@ class TestAfterPickListInsert(FrappeTestCase):
 	def test_batch_ids_check_on_enqueues_one_worker_per_wave_order_with_grouped_products(self):
 		"""Check on: one frappe.enqueue per Wave order, each with grouped+deduped products_data."""
 		# Two SOs map to two Wave orders. Two rows per SO with item batches.
-		doc = _pl(locations=[
-			_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
-			_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),  # dup -> deduped batch
-			_row("SO-001", item_code="MILK", batch_no="B-M-9", qty=2),
-			_row("SO-002", item_code="JTD011", batch_no="B-X", qty=4),
-		])
+		doc = _pl(
+			locations=[
+				_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
+				_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),  # dup -> deduped batch
+				_row("SO-001", item_code="MILK", batch_no="B-M-9", qty=2),
+				_row("SO-002", item_code="JTD011", batch_no="B-X", qty=4),
+			]
+		)
 
 		def _by_so(*args, **kwargs):
 			return {"SO-001": WAVE_ID_A, "SO-002": WAVE_ID_B}.get(args[1])
@@ -275,12 +275,18 @@ class TestAfterPickListInsert(FrappeTestCase):
 
 	def test_item_code_source_enqueues_sku_consolidated_payload(self):
 		"""picker_identifier_source = 'Item Code' -> one entry per SKU with [item_code]; comments carry ERP batch truth."""
-		doc = _pl(locations=[
-			_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
-			_row("SO-001", item_code="JTD011", batch_no="B-002", qty=2),
-		])
+		doc = _pl(
+			locations=[
+				_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
+				_row("SO-001", item_code="JTD011", batch_no="B-002", qty=2),
+			]
+		)
 		with (
-			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Code")),
+			patch.object(
+				frappe,
+				"get_cached_doc",
+				return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Code"),
+			),
 			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
 			patch.object(order_status, "dispatch_with_wave_order_ids"),
 			patch.object(frappe, "enqueue") as mock_enqueue,
@@ -295,12 +301,18 @@ class TestAfterPickListInsert(FrappeTestCase):
 
 	def test_item_barcode_source_enqueues_first_barcode_per_sku(self):
 		"""picker_identifier_source = 'Item Barcode' -> first Item Barcode row's value, one per SKU; comments still carry batches."""
-		doc = _pl(locations=[
-			_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
-			_row("SO-001", item_code="JTD011", batch_no="B-002", qty=2),
-		])
+		doc = _pl(
+			locations=[
+				_row("SO-001", item_code="JTD011", batch_no="B-001", qty=3),
+				_row("SO-001", item_code="JTD011", batch_no="B-002", qty=2),
+			]
+		)
 		with (
-			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Barcode")),
+			patch.object(
+				frappe,
+				"get_cached_doc",
+				return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Barcode"),
+			),
 			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
 			patch.object(frappe, "get_all", return_value=[{"barcode": "5901234123457"}]),
 			patch.object(order_status, "dispatch_with_wave_order_ids"),
@@ -316,10 +328,12 @@ class TestAfterPickListInsert(FrappeTestCase):
 
 	def test_item_barcode_source_missing_barcode_logs_error_and_skips(self):
 		"""picker_identifier_source = 'Item Barcode' + Item has no barcode -> Error row, SKU dropped, others still push."""
-		doc = _pl(locations=[
-			_row("SO-001", item_code="NO-BARCODE", batch_no="B-001", qty=1),
-			_row("SO-001", item_code="JTD011", batch_no="B-002", qty=4),
-		])
+		doc = _pl(
+			locations=[
+				_row("SO-001", item_code="NO-BARCODE", batch_no="B-001", qty=1),
+				_row("SO-001", item_code="JTD011", batch_no="B-002", qty=4),
+			]
+		)
 
 		def _barcode_lookup(*args, **kwargs):
 			filters = kwargs.get("filters") or {}
@@ -329,7 +343,11 @@ class TestAfterPickListInsert(FrappeTestCase):
 			return []
 
 		with (
-			patch.object(frappe, "get_cached_doc", return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Barcode")),
+			patch.object(
+				frappe,
+				"get_cached_doc",
+				return_value=_settings(batch_ids_enabled=1, picker_identifier_source="Item Barcode"),
+			),
 			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
 			patch.object(frappe, "get_all", side_effect=_barcode_lookup),
 			patch.object(order_status, "dispatch_with_wave_order_ids"),

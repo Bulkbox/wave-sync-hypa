@@ -41,6 +41,7 @@ from wave_sync_hypa.wave_sync_hypa.services import (
 )
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
 from wave_sync_hypa.wave_sync_hypa.services.pe_references import (
 	collect_distinct_wave_order_ids as _collect_distinct_wave_order_ids,
 )
@@ -91,6 +92,13 @@ def on_payment_entry_submit(doc, method=None) -> None:
 	intake (no push). Fully-settled Wave orders get one PATCH each, fanned
 	out via the async pusher.
 	"""
+	if skip_if_disabled(
+		new_correlation_id(),
+		doc_type=doc.doctype,
+		linked_doctype=doc.doctype,
+		linked_docname=doc.name,
+	):
+		return
 	if (doc.get("payment_type") or "").strip() != "Receive":
 		log_step(
 			correlation_id=new_correlation_id(),
@@ -127,7 +135,10 @@ def on_payment_entry_submit(doc, method=None) -> None:
 			)
 			continue
 		payment_status_pusher.enqueue_payment_status_push(
-			doc, wave_order_id, status, correlation_id=correlation_id,
+			doc,
+			wave_order_id,
+			status,
+			correlation_id=correlation_id,
 		)
 
 
