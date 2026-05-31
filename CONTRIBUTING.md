@@ -86,10 +86,29 @@ Refs #2
 
 ---
 
+## Tests
+
+The suite is split into two subpackages:
+
+- **`tests/unit/`** — pure-mock tests (frappe.db, wave_client, log_step etc. all patched). No DocType writes. Fast — ~1–2s for the full ~370-test sweep. **This is the dev-loop runner.**
+- **`tests/integration/`** — handler-driven tests that create real DocTypes (Customer, Sales Order, Wave Sync Log, Wave Settings, ...). Slow — minutes. Run on CI / before push.
+
+```bash
+# Dev loop (run on every change)
+bench --site dev.bulkbox.cloud run-tests --app wave_sync_hypa \
+    --module wave_sync_hypa.wave_sync_hypa.tests.unit
+
+# Pre-push (full sweep)
+bench --site dev.bulkbox.cloud run-tests --app wave_sync_hypa
+```
+
+A new test file goes into `unit/` unless it (a) calls a real handler entry point like `handle()` / `process_webhook()`, (b) calls `.insert()` / `.save()` / `frappe.delete_doc()`, or (c) calls `frappe.db.commit()`. Those go into `integration/`. After adding a file, add the matching `from .test_name import *  # noqa: F401, F403` line to the subpackage's `__init__.py` so `--module` discovery finds it.
+
 ## Verification checklist (run before pushing)
 
 - [ ] `bench migrate` completes cleanly on `dev.bulkbox.cloud`.
-- [ ] `bench --site dev.bulkbox.cloud run-tests --app wave_sync_hypa` passes.
+- [ ] `bench --site dev.bulkbox.cloud run-tests --app wave_sync_hypa --module wave_sync_hypa.wave_sync_hypa.tests.unit` passes (fast).
+- [ ] `bench --site dev.bulkbox.cloud run-tests --app wave_sync_hypa` passes (full sweep, slow — known `test_log_retention` `TooManyWritesError` at tail is pre-existing).
 - [ ] `pre-commit run --all-files` passes (ruff, eslint, prettier, pyupgrade).
 - [ ] No secrets, tokens, or `.env` contents committed.
 - [ ] Any new rule keys are documented in the PR body so the admin knows what to configure.
