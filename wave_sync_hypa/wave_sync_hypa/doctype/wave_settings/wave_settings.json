@@ -58,6 +58,7 @@
   "payment_method_mappings",
   "ipay_section",
   "ipay_verification_enabled",
+  "ipay_auto_create_payment_entry",
   "wave_payment_review_assignee"
  ],
  "fields": [
@@ -393,6 +394,13 @@
    "fieldname": "ipay_verification_enabled",
    "fieldtype": "Check",
    "label": "iPay Verification Enabled"
+  },
+  {
+   "default": "0",
+   "description": "When on, submitting a prepaid Sales Invoice automatically creates (or attaches to an existing iPay) Payment Entry, deduped by the iPay transaction code. Off by default — opt in once iPay verification is trusted. Leaves the invoice flagged for accounting when the Payment Entry can't be created/submitted.",
+   "fieldname": "ipay_auto_create_payment_entry",
+   "fieldtype": "Check",
+   "label": "iPay Auto-Create Payment Entry"
   },
   {
    "description": "User who receives a ToDo when a prepaid order's iPay payment cannot be verified (iPay absent, not paid, or unreachable). Leave blank to rely on the form banner + the 'Payment Review Required' list filter alone.",

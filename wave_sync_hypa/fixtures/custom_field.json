@@ -679,6 +679,36 @@
   "translatable": 0
  },
  {
+  "default": "0",
+  "description": "Set when this prepaid invoice's iPay Payment Entry could not be created/attached automatically (no verified payment, an already-submitted PE that can't be modified, or a validator block). The accounting team follows up; cleared automatically once the Payment Entry is submitted.",
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "wave_payment_review_required",
+  "fieldtype": "Check",
+  "in_standard_filter": 1,
+  "insert_after": "wave_manual_review_required",
+  "label": "Payment Review Required",
+  "modified": "2026-05-29 00:00:00",
+  "name": "Sales Invoice-wave_payment_review_required",
+  "no_copy": 1,
+  "read_only": 1,
+  "translatable": 0
+ },
+ {
+  "description": "Why this invoice is flagged for payment review (e.g. no verified iPay payment, or an existing submitted Payment Entry could not be reused).",
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "wave_payment_review_reason",
+  "fieldtype": "Small Text",
+  "insert_after": "wave_payment_review_required",
+  "label": "Payment Review Reason",
+  "modified": "2026-05-29 00:00:00",
+  "name": "Sales Invoice-wave_payment_review_reason",
+  "no_copy": 1,
+  "read_only": 1,
+  "translatable": 0
+ },
+ {
   "doctype": "Custom Field",
   "dt": "Payment Entry",
   "fieldname": "wave_order_id",

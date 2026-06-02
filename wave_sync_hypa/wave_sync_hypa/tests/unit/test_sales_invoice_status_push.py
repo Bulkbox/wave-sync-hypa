@@ -13,7 +13,7 @@ Three concerns covered:
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -51,6 +51,13 @@ def _si(
 
 def _item(*, sales_order=None, delivery_note=None) -> dict:
 	return {"sales_order": sales_order or "", "delivery_note": delivery_note or ""}
+
+
+def _settings_auto_pe_off() -> MagicMock:
+	"""Wave Settings stub with the prepaid auto-PE branch disabled (its default)."""
+	s = MagicMock(name="WaveSettings")
+	s.get.side_effect = lambda key, default=None: {"ipay_auto_create_payment_entry": 0}.get(key, default)
+	return s
 
 
 class TestStampWaveOrderId(FrappeTestCase):
@@ -173,6 +180,7 @@ class TestOnSalesInvoiceSubmit(FrappeTestCase):
 
 		with (
 			patch.object(frappe.db, "get_value", side_effect=_by_so),
+			patch.object(frappe, "get_cached_doc", return_value=_settings_auto_pe_off()),
 			patch.object(order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
 		):
 			si_handler.on_sales_invoice_submit(doc)
@@ -186,6 +194,7 @@ class TestOnSalesInvoiceSubmit(FrappeTestCase):
 		doc = _si(items=[_item()], wave_order_id=WAVE_ID_A)
 		with (
 			patch.object(frappe.db, "get_value", return_value=None),
+			patch.object(frappe, "get_cached_doc", return_value=_settings_auto_pe_off()),
 			patch.object(order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
 		):
 			si_handler.on_sales_invoice_submit(doc)
