@@ -16,6 +16,15 @@ frappe.ui.form.on("Sales Order", {
 		if (frm.doc.wave_push_failure_required_review) {
 			_render_push_failure_banner(frm);
 		}
+		if (frm.doc.wave_payment_review_required) {
+			_render_payment_review_banner(frm);
+		}
+		// iPay verification is operator-explicit, so the button shows on any
+		// prepaid Wave order regardless of docstatus — an accountant may want
+		// to re-check a payment before or after submitting / invoicing.
+		if (frm.doc.wave_payment_classification === "prepaid") {
+			_add_verify_ipay_button(frm);
+		}
 		if (!frm.is_new() && frm.doc.wave_order_id) {
 			_add_resync_status_button(frm);
 		}
@@ -134,6 +143,82 @@ function _render_push_failure_banner(frm) {
 		),
 		"red"
 	);
+}
+
+// Red banner when a prepaid order's iPay payment could not be verified and
+// has been flagged for the accounting team. The reason is carried on the doc
+// (wave_payment_review_reason); accounting follows up via the iPay record.
+function _render_payment_review_banner(frm) {
+	const reason = frm.doc.wave_payment_review_reason || __("payment could not be verified");
+	frm.set_intro(
+		__(
+			"Wave Sync — payment review required. {0} Use 'Verify iPay Payment' above to re-check, then reconcile the Payment Entry.",
+			[frappe.utils.escape_html(reason)]
+		),
+		"red"
+	);
+}
+
+// "Verify iPay Payment" — operator-triggered, synchronous lookup of the iPay
+// payment for a prepaid order. Stamps the iPay fields, clears/sets the review
+// flag, and shows the details in a message. Never a hard JS error: the server
+// degrades gracefully when iPay is absent or unreachable.
+function _add_verify_ipay_button(frm) {
+	frm.add_custom_button(
+		__("Verify iPay Payment"),
+		() => _call_verify_ipay_endpoint(frm),
+		__("Wave")
+	);
+}
+
+function _call_verify_ipay_endpoint(frm) {
+	frappe.call({
+		method: "wave_sync_hypa.wave_sync_hypa.api.sales_order.verify_ipay_payment",
+		args: { sales_order: frm.doc.name },
+		freeze: true,
+		freeze_message: __("Verifying payment with iPay..."),
+		callback(r) {
+			const result = r.message || {};
+			frm.reload_doc();
+			if (result.ok && result.paid) {
+				frappe.msgprint({
+					title: __("iPay payment confirmed"),
+					message: _format_ipay_details(result.data || {}),
+					indicator: "green",
+				});
+				return;
+			}
+			frappe.msgprint({
+				title: __("iPay payment not confirmed"),
+				message: __("{0}<br><br>Correlation: <code>{1}</code>", [
+					frappe.utils.escape_html(result.reason || __("Could not verify the payment.")),
+					result.correlation_id || "—",
+				]),
+				indicator: "orange",
+			});
+		},
+	});
+}
+
+// Render the confirmed iPay record as a compact key/value table.
+function _format_ipay_details(data) {
+	const rows = [
+		[__("Amount"), data.transaction_amount],
+		[__("Transaction Code"), data.transaction_code],
+		[__("Payment Mode"), data.payment_mode],
+		[__("Paid At"), data.paid_at],
+		[__("Payer"), [data.firstname, data.lastname].filter(Boolean).join(" ")],
+		[__("Phone"), data.telephone],
+	];
+	const body = rows
+		.filter(([, value]) => value)
+		.map(
+			([label, value]) =>
+				`<tr><td><b>${frappe.utils.escape_html(label)}</b></td>` +
+				`<td>${frappe.utils.escape_html(String(value))}</td></tr>`
+		)
+		.join("");
+	return `<table class="table table-bordered"><tbody>${body}</tbody></table>`;
 }
 
 // "Push to Wave" / "Send Order to Wave" — operator-triggered offline-order

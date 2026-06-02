@@ -5,8 +5,9 @@ concern and the operator UI endpoints have their own home.
 """
 
 import frappe
+from frappe import _
 
-from wave_sync_hypa.wave_sync_hypa.services import wave_order_creator
+from wave_sync_hypa.wave_sync_hypa.services import ipay_payment_sync, wave_order_creator
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 
 
@@ -38,6 +39,38 @@ def push_to_wave(sales_order: str) -> dict:
 	doc.check_permission("write")
 	correlation_id = new_correlation_id()
 	result = wave_order_creator.push_so_to_wave(sales_order, correlation_id)
+	result["correlation_id"] = correlation_id
+	frappe.db.commit()
+	return result
+
+
+@frappe.whitelist()
+def verify_ipay_payment(sales_order: str) -> dict:
+	"""Operator-triggered iPay payment verification for a prepaid Sales Order.
+
+	Invoked by the 'Verify iPay Payment' button. Synchronously looks the
+	payment up on iPay by the order's Wave friendly id (the iPay oid), stamps
+	the wave_ipay_* fields, sets/clears the accounting review flag, and returns
+	the details for the button to render. Resilient to iPay being absent,
+	unconfigured, or unreachable — the gateway degrades to "not verified"
+	rather than raising. (Honours the master switch + ipay_verification_enabled
+	via fetch_and_stamp.)
+
+	Every return carries the same shape so the JS can render uniformly:
+	  {"ok": True,  "paid": True,  "data": {...}, "reason": None, "correlation_id": "..."}
+	  {"ok": True,  "paid": False, "data": None,  "reason": "...", "correlation_id": "..."}
+	  {"ok": False, "paid": False, "data": None,  "reason": "...", "correlation_id": "..."}
+	"""
+	correlation_id = new_correlation_id()
+	doc = frappe.get_doc("Sales Order", sales_order)
+	doc.check_permission("read")
+	if (doc.get("wave_payment_classification") or "") != "prepaid":
+		return {
+			"ok": False, "paid": False, "data": None,
+			"reason": _("This is not a prepaid Wave order."),
+			"correlation_id": correlation_id,
+		}
+	result = ipay_payment_sync.fetch_and_stamp(sales_order, correlation_id)
 	result["correlation_id"] = correlation_id
 	frappe.db.commit()
 	return result
