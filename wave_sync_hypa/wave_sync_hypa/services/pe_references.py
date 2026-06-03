@@ -15,7 +15,13 @@ from __future__ import annotations
 
 import frappe
 
+from wave_sync_hypa.wave_sync_hypa.services.wave_order_ids import child_row_field
+
 REFERENCE_DOCTYPES_WITH_WAVE_ID = ("Sales Invoice", "Sales Order")
+
+# Re-exported under its historical name; the shared accessor lives in wave_order_ids.
+# payment_validator imports `ref_field` from here.
+ref_field = child_row_field
 
 
 def collect_distinct_wave_order_ids(doc) -> list[str]:
@@ -37,10 +43,3 @@ def collect_distinct_wave_order_ids(doc) -> list[str]:
 			seen.add(wave_order_id)
 			out.append(wave_order_id)
 	return out
-
-
-def ref_field(ref, fieldname: str) -> str:
-	"""Read a field off a PE reference row whether it's a Frappe doc, a _dict, or a plain dict."""
-	if hasattr(ref, "get"):
-		return (ref.get(fieldname) or "").strip()
-	return (getattr(ref, fieldname, "") or "").strip()

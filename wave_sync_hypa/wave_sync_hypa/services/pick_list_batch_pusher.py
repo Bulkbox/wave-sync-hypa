@@ -28,6 +28,7 @@ from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
 	STEP_MASTER_DISABLED,
 	is_wave_integration_enabled,
 )
+from wave_sync_hypa.wave_sync_hypa.services.wave_config import resolve_outbound_config
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 
 STEP_WORKER_STARTED = "pick_list_batch_ids_push_worker_started"
@@ -137,7 +138,7 @@ def _push_inner(
 		)
 		return
 
-	config = _resolve_outbound_config(settings)
+	config = resolve_outbound_config(settings)
 	if config is None:
 		log_step(
 			correlation_id=correlation_id,
@@ -289,13 +290,3 @@ def _get_or_resolve_wave_product_id(item_code: str, settings, correlation_id: st
 	if cached:
 		return cached
 	return product_resolver.resolve_wave_product_id(item_code, settings, correlation_id)
-
-
-def _resolve_outbound_config(settings) -> dict | None:
-	"""Pull every value the HTTP call needs; return None if any required piece is missing."""
-	base_url = (settings.get("wave_api_base_url") or "").strip()
-	app_id = (settings.get("wave_app_id") or "").strip()
-	api_key = settings.get_password("wave_api_key", raise_exception=False) or ""
-	if not (base_url and app_id and api_key):
-		return None
-	return {"base_url": base_url, "app_id": app_id, "api_key": api_key}

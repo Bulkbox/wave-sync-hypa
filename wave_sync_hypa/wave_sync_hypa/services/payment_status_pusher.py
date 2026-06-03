@@ -27,6 +27,7 @@ from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
 	STEP_MASTER_DISABLED,
 	is_wave_integration_enabled,
 )
+from wave_sync_hypa.wave_sync_hypa.services.wave_config import resolve_outbound_config
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 
 WORKER_DOTTED_PATH = (
@@ -139,7 +140,7 @@ def _push_inner(
 	correlation_id: str,
 ) -> None:
 	settings = frappe.get_cached_doc("Wave Settings")
-	config = _resolve_outbound_config(settings)
+	config = resolve_outbound_config(settings)
 	if config is None:
 		log_step(
 			correlation_id=correlation_id,
@@ -231,12 +232,3 @@ def _summarise_response(response: dict) -> dict:
 		"payment_status": response.get("paymentStatus"),
 		"updated_at": response.get("updatedAt"),
 	}
-
-
-def _resolve_outbound_config(settings) -> dict | None:
-	base_url = (settings.get("wave_api_base_url") or "").strip()
-	app_id = (settings.get("wave_app_id") or "").strip()
-	api_key = settings.get_password("wave_api_key", raise_exception=False) or ""
-	if not (base_url and app_id and api_key):
-		return None
-	return {"base_url": base_url, "app_id": app_id, "api_key": api_key}
