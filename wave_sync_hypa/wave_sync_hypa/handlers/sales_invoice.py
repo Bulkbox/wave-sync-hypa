@@ -26,9 +26,10 @@ from __future__ import annotations
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.handlers import order_status
-from wave_sync_hypa.wave_sync_hypa.services import credit_note_classifier
+from wave_sync_hypa.wave_sync_hypa.services import credit_note_classifier, prepaid_pe_creator
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
 
 STEP_STAMP_MULTI_SOURCE = "sales_invoice_wave_order_id_multi_source"
 STEP_SKIPPED_PARTIAL_RETURN = "sales_invoice_status_push_skipped_partial_return"
@@ -100,6 +101,29 @@ def on_sales_invoice_submit(doc, method=None) -> None:
 		return
 
 	order_status.dispatch_with_wave_order_ids(doc, "submit", wave_ids)
+
+	# Prepaid orders: ensure the iPay Payment Entry exists (find-update-attach
+	# / create). Only worth queuing for Wave-sourced SIs; the worker does the
+	# precise prepaid + single-source check.
+	if wave_ids:
+		_maybe_create_prepaid_payment_entry(doc)
+
+
+def _maybe_create_prepaid_payment_entry(doc) -> None:
+	"""Enqueue the prepaid PE create/attach when the feature flag + master switch allow it."""
+	settings = frappe.get_cached_doc("Wave Settings")
+	if not settings.get("ipay_auto_create_payment_entry"):
+		return
+	correlation_id = new_correlation_id()
+	if skip_if_disabled(
+		correlation_id,
+		doc_type="Sales Invoice",
+		action="prepaid_payment_entry",
+		linked_doctype="Sales Invoice",
+		linked_docname=doc.name,
+	):
+		return
+	prepaid_pe_creator.enqueue_payment_entry_creation(doc, correlation_id)
 
 
 def _handle_return(doc, wave_ids: list[str]) -> None:
