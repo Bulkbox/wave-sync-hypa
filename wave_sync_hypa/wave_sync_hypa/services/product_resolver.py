@@ -29,6 +29,7 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services import wave_client
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.wave_config import resolve_outbound_config
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
 
 STEP_RESOLVE_ATTEMPT = "product_resolve_attempt"
@@ -55,7 +56,7 @@ def resolve_wave_product_id(
 	Pass persist=False from contexts that don't want to write the resolved
 	id back to the Item — e.g. an admin "preview" probe in the Desk.
 	"""
-	config = _resolve_outbound_config(settings)
+	config = resolve_outbound_config(settings)
 	if config is None:
 		log_step(
 			correlation_id=correlation_id,
@@ -155,13 +156,3 @@ def _persist_wave_product_id(item_code: str, wave_id: str) -> None:
 	frappe.db.set_value(
 		"Item", item_code, "wave_product_id", wave_id, update_modified=False
 	)
-
-
-def _resolve_outbound_config(settings) -> dict | None:
-	"""Pull base_url, app_id, api_key from settings; None when any piece missing."""
-	base_url = (settings.get("wave_api_base_url") or "").strip()
-	app_id = (settings.get("wave_app_id") or "").strip()
-	api_key = settings.get_password("wave_api_key", raise_exception=False) or ""
-	if not (base_url and app_id and api_key):
-		return None
-	return {"base_url": base_url, "app_id": app_id, "api_key": api_key}

@@ -27,6 +27,7 @@ from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
 	STEP_MASTER_DISABLED,
 	is_wave_integration_enabled,
 )
+from wave_sync_hypa.wave_sync_hypa.services.wave_config import resolve_outbound_config
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError, WaveResolutionError
 
 STEP_PUSH_ATTEMPT = "erp_to_wave_push_attempt"
@@ -57,7 +58,7 @@ def push_so_to_wave(so_name: str, correlation_id: str) -> dict:
 			"ERP → Wave Order Push is disabled in Wave Settings.",
 		)
 
-	config = _resolve_outbound_config(settings)
+	config = resolve_outbound_config(settings)
 	if config is None:
 		return _abort_with_notification(
 			so_name, settings, correlation_id, STEP_PUSH_ABORTED_MISSING_CONFIG,
@@ -180,13 +181,3 @@ def _abort_silently(so_name: str, correlation_id: str, step: str, reason: str) -
 		error_message=reason,
 	)
 	return {"ok": False, "reason": reason}
-
-
-def _resolve_outbound_config(settings) -> dict | None:
-	"""Pull base_url / api_key / app_id; return None if any required piece is missing."""
-	base_url = (settings.get("wave_api_base_url") or "").strip()
-	app_id = (settings.get("wave_app_id") or "").strip()
-	api_key = settings.get_password("wave_api_key", raise_exception=False) or ""
-	if not (base_url and app_id and api_key):
-		return None
-	return {"base_url": base_url, "app_id": app_id, "api_key": api_key}
