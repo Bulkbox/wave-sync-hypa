@@ -39,6 +39,11 @@ from wave_sync_hypa.wave_sync_hypa.services import picker_identifier
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
+from wave_sync_hypa.wave_sync_hypa.services.wave_order_ids import (
+	child_row_field,
+	dedupe_preserving_order,
+	wave_order_id_of,
+)
 
 STEP_STAMP_MULTI_SOURCE = "pick_list_wave_order_id_multi_source"
 STEP_NO_WAVE_ORDERS = "pick_list_no_wave_sourced_orders"
@@ -287,24 +292,14 @@ def _build_so_to_wave_map(doc) -> dict[str, str]:
 
 def _collect_distinct_wave_order_ids(doc) -> list[str]:
 	"""Return unique Wave order ids reachable from this Pick List's rows, in row order."""
-	seen: set[str] = set()
-	out: list[str] = []
-	for row in doc.get("locations") or []:
-		so_name = _row_field(row, "sales_order")
-		if not so_name:
-			continue
-		wave_order_id = (frappe.db.get_value("Sales Order", so_name, "wave_order_id") or "").strip()
-		if wave_order_id and wave_order_id not in seen:
-			seen.add(wave_order_id)
-			out.append(wave_order_id)
-	return out
+	return dedupe_preserving_order(
+		wave_order_id_of("Sales Order", _row_field(row, "sales_order"))
+		for row in doc.get("locations") or []
+	)
 
 
-def _row_field(row, fieldname: str) -> str:
-	"""Read a field off a child row whether it's a Frappe doc, a _dict, or a plain dict."""
-	if hasattr(row, "get"):
-		return (row.get(fieldname) or "").strip()
-	return (getattr(row, fieldname, "") or "").strip()
+# This handler and pe_references share one child-row accessor.
+_row_field = child_row_field
 
 
 def block_unprivileged_pick_list_submit(doc, method=None) -> None:

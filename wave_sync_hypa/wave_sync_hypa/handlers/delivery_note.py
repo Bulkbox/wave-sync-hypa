@@ -40,6 +40,11 @@ import frappe
 from wave_sync_hypa.wave_sync_hypa.handlers import order_status
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.wave_order_ids import (
+	child_row_field,
+	dedupe_preserving_order,
+	wave_order_id_of,
+)
 
 STEP_STAMP = "delivery_note_wave_order_id_stamped"
 STEP_STAMP_MULTI_SOURCE = "delivery_note_wave_order_id_multi_source"
@@ -210,14 +215,7 @@ def _collect_distinct_wave_order_ids(doc) -> list[str]:
 	don't link back to a Wave-sourced SO are silently skipped — a single
 	mixed DN that combines Wave and non-Wave lines is a legitimate flow.
 	"""
-	seen: set[str] = set()
-	out: list[str] = []
-	for item in doc.get("items") or []:
-		so_name = (item.get("against_sales_order") or "").strip()
-		if not so_name:
-			continue
-		wave_order_id = (frappe.db.get_value("Sales Order", so_name, "wave_order_id") or "").strip()
-		if wave_order_id and wave_order_id not in seen:
-			seen.add(wave_order_id)
-			out.append(wave_order_id)
-	return out
+	return dedupe_preserving_order(
+		wave_order_id_of("Sales Order", child_row_field(item, "against_sales_order"))
+		for item in doc.get("items") or []
+	)

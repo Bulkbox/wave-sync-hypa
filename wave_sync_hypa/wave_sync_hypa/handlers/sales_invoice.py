@@ -29,6 +29,11 @@ from wave_sync_hypa.wave_sync_hypa.handlers import order_status
 from wave_sync_hypa.wave_sync_hypa.services import credit_note_classifier
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
+from wave_sync_hypa.wave_sync_hypa.services.wave_order_ids import (
+	child_row_field,
+	dedupe_preserving_order,
+	wave_order_id_of,
+)
 
 STEP_STAMP_MULTI_SOURCE = "sales_invoice_wave_order_id_multi_source"
 STEP_SKIPPED_PARTIAL_RETURN = "sales_invoice_status_push_skipped_partial_return"
@@ -164,26 +169,12 @@ def _collect_distinct_wave_order_ids(doc) -> list[str]:
 	"first stamped id" is deterministic and reflects the operator's row
 	ordering.
 	"""
-	seen: set[str] = set()
-	out: list[str] = []
-	for item in doc.get("items") or []:
-		wave_order_id = _resolve_item_wave_order_id(item)
-		if wave_order_id and wave_order_id not in seen:
-			seen.add(wave_order_id)
-			out.append(wave_order_id)
-	return out
+	return dedupe_preserving_order(_resolve_item_wave_order_id(item) for item in doc.get("items") or [])
 
 
 def _resolve_item_wave_order_id(item) -> str:
-	"""Return the wave_order_id reachable from a single SI item, or '' if none."""
-	so_name = (item.get("sales_order") or "").strip()
-	if so_name:
-		so_wave_id = (frappe.db.get_value("Sales Order", so_name, "wave_order_id") or "").strip()
-		if so_wave_id:
-			return so_wave_id
-	dn_name = (item.get("delivery_note") or "").strip()
-	if dn_name:
-		dn_wave_id = (frappe.db.get_value("Delivery Note", dn_name, "wave_order_id") or "").strip()
-		if dn_wave_id:
-			return dn_wave_id
-	return ""
+	"""Return the wave_order_id reachable from a single SI item — Sales Order first, then Delivery Note."""
+	return (
+		wave_order_id_of("Sales Order", child_row_field(item, "sales_order"))
+		or wave_order_id_of("Delivery Note", child_row_field(item, "delivery_note"))
+	)
