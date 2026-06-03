@@ -188,6 +188,63 @@ class TestResetPickerStateWorker(FrappeTestCase):
 		self.assertIsNone(summary["picking"])
 		self.assertNotIn("products", summary)
 
+	def test_residual_picker_state_logs_warning_not_success(self):
+		"""Wave returns 2xx but pickerStatus/picking come back populated -> mismatch Warning."""
+		response = {
+			"_id": DUMMY_WAVE_ID_A,
+			"status": "ACCEPTED",
+			"pickerStatus": "COLLECTED",  # reset did not take
+			"picking": {"completedAt": "2026-05-28T09:00:00.000Z"},
+			"updatedAt": "2026-05-28T10:00:00.000Z",
+		}
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(
+				pick_list_amend_resetter.wave_client, "patch_order_top_level", return_value=response,
+			),
+			patch.object(pick_list_amend_resetter, "log_step") as mock_log,
+		):
+			self._call()
+
+		mismatch = [
+			c for c in mock_log.call_args_list
+			if c.kwargs.get("step") == pick_list_amend_resetter.STEP_RESPONSE_MISMATCH
+		]
+		self.assertEqual(len(mismatch), 1)
+		self.assertEqual(mismatch[0].kwargs.get("level"), "Warning")
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertNotIn(pick_list_amend_resetter.STEP_SUCCESS, steps)
+
+	def test_non_dict_response_treated_as_mismatch(self):
+		"""Unparseable / non-dict response can't confirm the reset -> mismatch, not success."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(
+				pick_list_amend_resetter.wave_client, "patch_order_top_level", return_value="<text>",
+			),
+			patch.object(pick_list_amend_resetter, "log_step") as mock_log,
+		):
+			self._call()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(pick_list_amend_resetter.STEP_RESPONSE_MISMATCH, steps)
+		self.assertNotIn(pick_list_amend_resetter.STEP_SUCCESS, steps)
+
+	def test_dict_without_order_id_is_unverifiable_not_success(self):
+		"""A garbage 2xx body (no _id, no picker keys) must not read as a clean reset."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(
+				pick_list_amend_resetter.wave_client,
+				"patch_order_top_level",
+				return_value={"raw": "<html>upstream error</html>"},
+			),
+			patch.object(pick_list_amend_resetter, "log_step") as mock_log,
+		):
+			self._call()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(pick_list_amend_resetter.STEP_RESPONSE_MISMATCH, steps)
+		self.assertNotIn(pick_list_amend_resetter.STEP_SUCCESS, steps)
+
 	def test_outbound_error_logged_and_swallowed(self):
 		"""HTTP failure -> STEP_FAILED Error row, worker does not raise."""
 		with (

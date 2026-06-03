@@ -143,6 +143,46 @@ class TestPushPaymentStatusWorker(FrappeTestCase):
 		self.assertIn(payment_status_pusher.STEP_ATTEMPT, steps)
 		self.assertIn(payment_status_pusher.STEP_SUCCESS, steps)
 
+	def test_response_paymentstatus_mismatch_logs_warning_not_success(self):
+		"""Wave returns 2xx but echoes a different paymentStatus -> mismatch Warning, no success."""
+		response = {
+			"_id": DUMMY_WAVE_ID,
+			"status": "UNDER_DELIVERY",
+			"paymentStatus": "PENDING",  # we sent COMPLETED
+			"updatedAt": "2026-05-28T10:00:00.000Z",
+		}
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(
+				payment_status_pusher.wave_client, "patch_order_top_level", return_value=response,
+			),
+			patch.object(payment_status_pusher, "log_step") as mock_log,
+		):
+			self._call("COMPLETED")
+
+		mismatch = [
+			c for c in mock_log.call_args_list
+			if c.kwargs.get("step") == payment_status_pusher.STEP_RESPONSE_MISMATCH
+		]
+		self.assertEqual(len(mismatch), 1)
+		self.assertEqual(mismatch[0].kwargs.get("level"), "Warning")
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertNotIn(payment_status_pusher.STEP_SUCCESS, steps)
+
+	def test_non_dict_response_treated_as_mismatch(self):
+		"""Unparseable / non-dict response can't confirm the field -> mismatch, not success."""
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(
+				payment_status_pusher.wave_client, "patch_order_top_level", return_value="<text>",
+			),
+			patch.object(payment_status_pusher, "log_step") as mock_log,
+		):
+			self._call("COMPLETED")
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(payment_status_pusher.STEP_RESPONSE_MISMATCH, steps)
+		self.assertNotIn(payment_status_pusher.STEP_SUCCESS, steps)
+
 	def test_outbound_error_logged_and_swallowed(self):
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=_settings()),
