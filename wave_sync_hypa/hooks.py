@@ -151,6 +151,7 @@ doc_events = {
 	"Sales Order": {
 		"before_insert": "wave_sync_hypa.wave_sync_hypa.handlers.sales_order_amend.wipe_wave_fields_on_amend",
 		"validate": "wave_sync_hypa.wave_sync_hypa.handlers.sales_order_validation.validate_unique_wave_order_id",
+		"after_insert": "wave_sync_hypa.wave_sync_hypa.handlers.sales_order_ipay.fetch_ipay_on_prepaid_insert",
 		"on_submit": [
 			"wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_submit",
 			"wave_sync_hypa.wave_sync_hypa.handlers.order_status.maybe_auto_push_to_wave",

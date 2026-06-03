@@ -55,7 +55,10 @@
   "outbound_status_rules",
   "fee_mappings",
   "tax_rules",
-  "payment_method_mappings"
+  "payment_method_mappings",
+  "ipay_section",
+  "ipay_verification_enabled",
+  "wave_payment_review_assignee"
  ],
  "fields": [
   {
@@ -378,6 +381,25 @@
    "fieldtype": "Table",
    "label": "Payment Method Mappings",
    "options": "Wave Payment Method Mapping"
+  },
+  {
+   "fieldname": "ipay_section",
+   "fieldtype": "Section Break",
+   "label": "iPay Payment Verification"
+  },
+  {
+   "default": "1",
+   "description": "When on, prepaid orders are verified against the same-site iPay app: a payment lookup fires on order creation and via the 'Verify iPay Payment' button on the Sales Order. Off => no iPay lookups (the integration still works; payments just aren't auto-verified).",
+   "fieldname": "ipay_verification_enabled",
+   "fieldtype": "Check",
+   "label": "iPay Verification Enabled"
+  },
+  {
+   "description": "User who receives a ToDo when a prepaid order's iPay payment cannot be verified (iPay absent, not paid, or unreachable). Leave blank to rely on the form banner + the 'Payment Review Required' list filter alone.",
+   "fieldname": "wave_payment_review_assignee",
+   "fieldtype": "Link",
+   "label": "Payment Review Assignee",
+   "options": "User"
   }
  ],
  "index_web_pages_for_search": 1,

@@ -25,12 +25,15 @@ from .test_delivery_note_status_push import *  # noqa: F401, F403
 from .test_delivery_type_classifier import *  # noqa: F401, F403
 from .test_intake_review_notifier import *  # noqa: F401, F403
 from .test_intake_soft_fail_items import *  # noqa: F401, F403
+from .test_ipay_gateway import *  # noqa: F401, F403
+from .test_ipay_payment_sync import *  # noqa: F401, F403
 from .test_item_resolver import *  # noqa: F401, F403
 from .test_json_tools import *  # noqa: F401, F403
 from .test_money import *  # noqa: F401, F403
 from .test_order_status_push import *  # noqa: F401, F403
 from .test_payment_entry_status_push import *  # noqa: F401, F403
 from .test_payment_metadata_intake import *  # noqa: F401, F403
+from .test_payment_review_flag import *  # noqa: F401, F403
 from .test_payment_status_pusher import *  # noqa: F401, F403
 from .test_payment_status_resolver import *  # noqa: F401, F403
 from .test_payment_validator import *  # noqa: F401, F403
@@ -44,6 +47,8 @@ from .test_product_resolver import *  # noqa: F401, F403
 from .test_sales_invoice_status_push import *  # noqa: F401, F403
 from .test_sales_order_amend import *  # noqa: F401, F403
 from .test_sales_order_auto_push import *  # noqa: F401, F403
+from .test_sales_order_ipay_api import *  # noqa: F401, F403
+from .test_sales_order_ipay_handler import *  # noqa: F401, F403
 from .test_sales_order_validation import *  # noqa: F401, F403
 from .test_shipday_intercept import *  # noqa: F401, F403
 from .test_shipping_back_calc import *  # noqa: F401, F403
