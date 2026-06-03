@@ -43,6 +43,7 @@ STEP_ENQUEUE_FAILED = "pick_list_amend_picker_reset_enqueue_failed"
 STEP_WORKER_STARTED = "pick_list_amend_picker_reset_worker_started"
 STEP_ATTEMPT = "pick_list_amend_picker_reset_attempt"
 STEP_SUCCESS = "pick_list_amend_picker_reset_success"
+STEP_RESPONSE_MISMATCH = "pick_list_amend_picker_reset_response_mismatch"
 STEP_FAILED = "pick_list_amend_picker_reset_failed"
 STEP_ABORTED_MISSING_CONFIG = "pick_list_amend_picker_reset_aborted_missing_config"
 STEP_UNEXPECTED_ERROR = "pick_list_amend_picker_reset_unexpected_error"
@@ -194,6 +195,26 @@ def _reset_inner(pick_list_name: str, wave_order_id: str, correlation_id: str) -
 		)
 		return
 
+	leftover = _residual_picker_state(response)
+	if leftover:
+		log_step(
+			correlation_id=correlation_id,
+			step=STEP_RESPONSE_MISMATCH,
+			level="Warning",
+			doc_type="Pick List",
+			linked_doctype="Pick List",
+			linked_docname=pick_list_name,
+			wave_id=wave_order_id,
+			request_body={"path": url_path, "body": PICKER_STATE_RESET_BODY},
+			response_body=_summarise_response(response),
+			error_message=(
+				"Wave acknowledged the PATCH (HTTP success) but the picker state is still "
+				f"populated after the reset: {leftover}. The picker app may keep filtering the "
+				"amended order out; verify the order on Wave."
+			),
+		)
+		return
+
 	log_step(
 		correlation_id=correlation_id,
 		step=STEP_SUCCESS,
@@ -205,6 +226,26 @@ def _reset_inner(pick_list_name: str, wave_order_id: str, correlation_id: str) -
 		request_body={"path": url_path, "body": PICKER_STATE_RESET_BODY},
 		response_body=_summarise_response(response),
 	)
+
+
+def _residual_picker_state(response) -> dict:
+	"""Return the picker fields Wave left populated after the null reset, or {} if clean.
+
+	This is a *negative* confirmation (we expect both fields to come back
+	empty), so a body we can't recognise as a real order echo must count as
+	"could not verify" — otherwise a garbage 2xx body (e.g. wave_client's
+	`{"raw": ...}` parse-failure wrapper, which simply lacks the picker keys)
+	would read as a clean reset. We use `_id` as the order-echo marker, the
+	same signal wave_client uses to validate a 2xx product body.
+	"""
+	if not isinstance(response, dict) or not response.get("_id"):
+		return {"response": "unrecognised order body; reset could not be verified"}
+	out: dict = {}
+	if response.get("pickerStatus"):
+		out["pickerStatus"] = response.get("pickerStatus")
+	if response.get("picking"):
+		out["picking"] = "<still populated>"
+	return out
 
 
 def _summarise_response(response: dict) -> dict:

@@ -38,6 +38,7 @@ STEP_ENQUEUE_FAILED = "payment_status_push_enqueue_failed"
 STEP_WORKER_STARTED = "payment_status_push_worker_started"
 STEP_ATTEMPT = "payment_status_push_attempt"
 STEP_SUCCESS = "payment_status_push_success"
+STEP_RESPONSE_MISMATCH = "payment_status_push_response_mismatch"
 STEP_FAILED = "payment_status_push_failed"
 STEP_ABORTED_MISSING_CONFIG = "payment_status_push_aborted_missing_config"
 STEP_UNEXPECTED_ERROR = "payment_status_push_unexpected_error"
@@ -184,6 +185,26 @@ def _push_inner(
 			request_body={"path": url_path, "body": body},
 			error_message=str(exc),
 			stack_trace=frappe.get_traceback(),
+		)
+		return
+
+	actual = response.get("paymentStatus") if isinstance(response, dict) else None
+	if actual != payment_status:
+		log_step(
+			correlation_id=correlation_id,
+			step=STEP_RESPONSE_MISMATCH,
+			level="Warning",
+			doc_type="Payment Entry",
+			linked_doctype="Payment Entry",
+			linked_docname=pe_name,
+			wave_id=wave_order_id,
+			request_body={"path": url_path, "body": body},
+			response_body=_summarise_response(response),
+			error_message=(
+				f"Wave acknowledged the PATCH (HTTP success) but its paymentStatus is "
+				f"{actual!r}, not the {payment_status!r} we sent. Wave may have rejected the "
+				"transition; verify the order on Wave before treating it as settled."
+			),
 		)
 		return
 
