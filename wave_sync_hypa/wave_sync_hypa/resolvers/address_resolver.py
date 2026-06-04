@@ -23,6 +23,7 @@ from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 
 STEP_ADDRESS_UPSERT_UPDATED = "address_upsert_updated"
 STEP_ADDRESS_UNLINKED_ON_WAVE_DELETE = "address_unlinked_on_wave_delete"
+STEP_ADDRESS_RELINKED_ON_REUSE = "address_relinked_on_reuse"
 
 _TIMEZONE_TO_COUNTRY: dict[str, str] = {
 	"Africa/Nairobi": "Kenya",
@@ -60,9 +61,52 @@ def append_if_new(
 	existing = _find_by_wave_address_id(wave_address_id)
 	if existing:
 		_apply_updates_if_changed(existing, wave_address, correlation_id)
+		_ensure_linked_and_active(existing, customer_name, correlation_id)
 		return existing, False
 
 	return _create_address(customer_name, wave_address), True
+
+
+def _ensure_linked_and_active(address_name: str, customer_name: str, correlation_id: str) -> None:
+	"""Restore the Customer link and clear `disabled` on a reused Address.
+
+	A prior CUSTOMER.UPDATE may have soft-deleted this Address
+	(disable_addresses_missing_from_payload removes the Customer Dynamic Link
+	and sets disabled=1). When a later order references the same wave_address_id,
+	the existing-match branch would otherwise hand back an Address ERPNext sees
+	as not belonging to the party, failing the Sales Order's billing-address
+	validation. Re-attach the link (idempotent — Addresses may link to several
+	Customers) and re-enable. No-op on the common path where the link is present
+	and the Address is active.
+	"""
+	has_link = frappe.db.exists(
+		"Dynamic Link",
+		{
+			"parenttype": "Address",
+			"parent": address_name,
+			"link_doctype": "Customer",
+			"link_name": customer_name,
+		},
+	)
+	disabled = bool(frappe.db.get_value("Address", address_name, "disabled"))
+	if has_link and not disabled:
+		return
+
+	address = frappe.get_doc("Address", address_name)
+	if not has_link:
+		address.append("links", {"link_doctype": "Customer", "link_name": customer_name})
+	if disabled:
+		address.disabled = 0
+	address.save(ignore_permissions=True)
+	log_step(
+		correlation_id=correlation_id or new_correlation_id(),
+		step=STEP_ADDRESS_RELINKED_ON_REUSE,
+		level="Info",
+		doc_type="Address",
+		linked_doctype="Address",
+		linked_docname=address_name,
+		request_body={"customer": customer_name, "relinked": not has_link, "reenabled": disabled},
+	)
 
 
 def disable_addresses_missing_from_payload(
