@@ -292,6 +292,41 @@ class TestCustomerHandler(FrappeTestCase):
 		)
 		self.assertEqual(len(log_rows), 1)
 
+	def test_reused_soft_deleted_address_is_relinked_and_reenabled(self):
+		"""Regression (#140): an order re-referencing a soft-deleted address re-links + re-enables it.
+
+		Mirrors the live failure of order 10000113: a CUSTOMER.UPDATE soft-deletes
+		an address (disabled + Customer link removed); a later order references the
+		same wave_address_id; append_if_new must hand back a usable, linked Address
+		so the Sales Order's billing-address validation passes.
+		"""
+		handle(self._payload(addresses=[self._address()]), self.correlation_id)
+		customer = find_customer_by_wave_id(self.wave_customer_id)
+		address_name = frappe.db.get_value(
+			"Address", {"wave_address_id": self.wave_address_id}, "name"
+		)
+		# Soft-delete it by omitting the address from the next CUSTOMER.UPDATE.
+		handle(self._payload(addresses=[]), self.correlation_id)
+		self.assertEqual(int(frappe.db.get_value("Address", address_name, "disabled") or 0), 1)
+
+		# A later order re-references the same Wave address id.
+		returned, created = append_if_new(customer, self._address(), self.correlation_id)
+
+		self.assertEqual(returned, address_name)
+		self.assertFalse(created)
+		# Re-enabled and re-linked to the order's customer.
+		self.assertEqual(int(frappe.db.get_value("Address", address_name, "disabled") or 0), 0)
+		links = frappe.get_all(
+			"Dynamic Link",
+			filters={"parent": address_name, "link_doctype": "Customer", "link_name": customer},
+		)
+		self.assertEqual(len(links), 1)
+		relink_rows = frappe.get_all(
+			"Wave Sync Log",
+			filters={"correlation_id": self.correlation_id, "step": "address_relinked_on_reuse"},
+		)
+		self.assertEqual(len(relink_rows), 1)
+
 	def test_payload_without_addresses_key_does_not_disable_anything(self):
 		"""Missing `addresses` key is treated as 'untouched', not 'all deleted'."""
 		handle(self._payload(addresses=[self._address()]), self.correlation_id)
