@@ -27,8 +27,13 @@ def process_webhook(
 	doc_type: str,
 	action: str,
 	payload: dict,
+	force: bool = False,
 ) -> None:
-	"""Handle one webhook: dedup, dispatch, log; never raise out of the worker."""
+	"""Handle one webhook: dedup, dispatch, log; never raise out of the worker.
+
+	`force=True` (operator replay) skips the updated_at idempotency check; the
+	handler's own existing-record lookup still prevents creating a duplicate.
+	"""
 	wave_id = (payload or {}).get("_id")
 	wave_updated_at = (payload or {}).get("updatedAt")
 	friendly_id = (payload or {}).get("friendlyId")
@@ -45,7 +50,7 @@ def process_webhook(
 		)
 		return
 
-	if is_duplicate(wave_id, wave_updated_at):
+	if not force and is_duplicate(wave_id, wave_updated_at):
 		log_step(
 			correlation_id,
 			"Skipped",

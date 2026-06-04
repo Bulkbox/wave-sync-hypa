@@ -48,6 +48,7 @@ doctype_js = {
 	"Wave Settings": "public/js/wave_settings.js",
 	"Item": "public/js/item.js",
 	"Pick List": "public/js/pick_list.js",
+	"Wave Sync Log": "public/js/wave_sync_log.js",
 }
 doctype_list_js = {
 	"Item": "public/js/item_list.js",

@@ -49,6 +49,7 @@ from .test_sales_order_amend import *  # noqa: F401, F403
 from .test_sales_order_auto_push import *  # noqa: F401, F403
 from .test_sales_order_ipay_api import *  # noqa: F401, F403
 from .test_sales_order_ipay_handler import *  # noqa: F401, F403
+from .test_replay import *  # noqa: F401, F403
 from .test_sales_order_validation import *  # noqa: F401, F403
 from .test_shipday_intercept import *  # noqa: F401, F403
 from .test_shipping_back_calc import *  # noqa: F401, F403
