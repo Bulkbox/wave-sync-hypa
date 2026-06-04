@@ -126,12 +126,16 @@ class TestResetPickerStateWorker(FrappeTestCase):
 		self.assertIn(pick_list_amend_resetter.STEP_ABORTED_MISSING_CONFIG, steps)
 
 	def test_calls_patch_order_top_level_with_null_picker_body(self):
-		"""The whole point: body is exactly {pickerStatus: None, picking: None}."""
+		"""The whole point: body is exactly {pickerStatus: None, picking: None}.
+
+		Wave normalises that to pickerStatus null + picking {"items": []} (issue
+		#138), which must read as a clean reset, not residual.
+		"""
 		response = {
 			"_id": DUMMY_WAVE_ID_A,
 			"status": "ACCEPTED",
 			"pickerStatus": None,
-			"picking": None,
+			"picking": {"items": []},
 			"updatedAt": "2026-05-28T10:00:00.000Z",
 		}
 		with (
@@ -161,7 +165,7 @@ class TestResetPickerStateWorker(FrappeTestCase):
 			"_id": DUMMY_WAVE_ID_A,
 			"status": "ACCEPTED",
 			"pickerStatus": None,
-			"picking": None,
+			"picking": {"items": []},
 			"updatedAt": "2026-05-28T10:00:00.000Z",
 			"products": [{"productId": "noise"}],  # excluded from summary
 		}
@@ -185,16 +189,16 @@ class TestResetPickerStateWorker(FrappeTestCase):
 		self.assertEqual(summary["order_id"], DUMMY_WAVE_ID_A)
 		self.assertEqual(summary["status"], "ACCEPTED")
 		self.assertIsNone(summary["picker_status"])
-		self.assertIsNone(summary["picking"])
+		self.assertEqual(summary["picking"], {"items": []})
 		self.assertNotIn("products", summary)
 
 	def test_residual_picker_state_logs_warning_not_success(self):
-		"""Wave returns 2xx but pickerStatus/picking come back populated -> mismatch Warning."""
+		"""Wave returns 2xx but pickerStatus + picking.items come back populated -> mismatch."""
 		response = {
 			"_id": DUMMY_WAVE_ID_A,
 			"status": "ACCEPTED",
 			"pickerStatus": "COLLECTED",  # reset did not take
-			"picking": {"completedAt": "2026-05-28T09:00:00.000Z"},
+			"picking": {"items": [{"productId": "X", "status": "PICKED"}]},
 			"updatedAt": "2026-05-28T10:00:00.000Z",
 		}
 		with (
@@ -213,6 +217,52 @@ class TestResetPickerStateWorker(FrappeTestCase):
 		self.assertEqual(len(mismatch), 1)
 		self.assertEqual(mismatch[0].kwargs.get("level"), "Warning")
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertNotIn(pick_list_amend_resetter.STEP_SUCCESS, steps)
+
+	def test_empty_items_picking_is_cleared_not_residual(self):
+		"""Regression (#138): Wave's cleared form is pickerStatus null + picking {items: []}.
+
+		That truthy-but-empty dict must read as a successful reset, not a
+		false-positive mismatch.
+		"""
+		response = {
+			"_id": DUMMY_WAVE_ID_A,
+			"status": "ACCEPTED",
+			"pickerStatus": None,
+			"picking": {"items": []},
+			"updatedAt": "2026-05-28T10:00:00.000Z",
+		}
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(
+				pick_list_amend_resetter.wave_client, "patch_order_top_level", return_value=response,
+			),
+			patch.object(pick_list_amend_resetter, "log_step") as mock_log,
+		):
+			self._call()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(pick_list_amend_resetter.STEP_SUCCESS, steps)
+		self.assertNotIn(pick_list_amend_resetter.STEP_RESPONSE_MISMATCH, steps)
+
+	def test_items_populated_with_null_pickerstatus_still_flagged(self):
+		"""Safety net: if Wave ignores the reset and leaves items, flag it even when pickerStatus null."""
+		response = {
+			"_id": DUMMY_WAVE_ID_A,
+			"status": "ACCEPTED",
+			"pickerStatus": None,
+			"picking": {"items": [{"productId": "X"}]},
+			"updatedAt": "2026-05-28T10:00:00.000Z",
+		}
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(
+				pick_list_amend_resetter.wave_client, "patch_order_top_level", return_value=response,
+			),
+			patch.object(pick_list_amend_resetter, "log_step") as mock_log,
+		):
+			self._call()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(pick_list_amend_resetter.STEP_RESPONSE_MISMATCH, steps)
 		self.assertNotIn(pick_list_amend_resetter.STEP_SUCCESS, steps)
 
 	def test_non_dict_response_treated_as_mismatch(self):

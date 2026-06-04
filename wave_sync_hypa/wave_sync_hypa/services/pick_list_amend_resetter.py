@@ -232,20 +232,31 @@ def _reset_inner(pick_list_name: str, wave_order_id: str, correlation_id: str) -
 def _residual_picker_state(response) -> dict:
 	"""Return the picker fields Wave left populated after the null reset, or {} if clean.
 
-	This is a *negative* confirmation (we expect both fields to come back
+	This is a *negative* confirmation (we expect the picker state to come back
 	empty), so a body we can't recognise as a real order echo must count as
 	"could not verify" — otherwise a garbage 2xx body (e.g. wave_client's
 	`{"raw": ...}` parse-failure wrapper, which simply lacks the picker keys)
 	would read as a clean reset. We use `_id` as the order-echo marker, the
 	same signal wave_client uses to validate a 2xx product body.
+
+	A live trace (issue #138) shows Wave normalises `picking: null` to an
+	empty `{"items": []}` rather than literal null, so a *successful* reset
+	returns a truthy `picking` dict. The order is cleared when pickerStatus is
+	empty and picking carries no items; residual when pickerStatus is still set
+	or picking still lists items (Wave ignored the reset).
 	"""
 	if not isinstance(response, dict) or not response.get("_id"):
 		return {"response": "unrecognised order body; reset could not be verified"}
 	out: dict = {}
 	if response.get("pickerStatus"):
 		out["pickerStatus"] = response.get("pickerStatus")
-	if response.get("picking"):
-		out["picking"] = "<still populated>"
+	picking = response.get("picking")
+	if isinstance(picking, dict):
+		items = picking.get("items")
+		if items:
+			out["picking_items"] = len(items) if isinstance(items, list) else items
+	elif picking:
+		out["picking"] = "<unexpected non-dict picking>"
 	return out
 
 
