@@ -37,7 +37,6 @@ from .test_payment_review_flag import *  # noqa: F401, F403
 from .test_payment_status_pusher import *  # noqa: F401, F403
 from .test_payment_status_resolver import *  # noqa: F401, F403
 from .test_payment_validator import *  # noqa: F401, F403
-from .test_pick_list_amend_resetter import *  # noqa: F401, F403
 from .test_pick_list_api import *  # noqa: F401, F403
 from .test_pick_list_batch_pusher import *  # noqa: F401, F403
 from .test_pick_list_status_push import *  # noqa: F401, F403

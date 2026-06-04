@@ -12,8 +12,7 @@ one job per Wave order touched by the PE; this worker's job is to:
 
 Top-level try/except wraps the body so an unexpected exception in one job
 never breaks the worker loop. Same defensive shape as the other outbound
-workers (`order_status_pusher`, `pick_list_batch_pusher`,
-`pick_list_amend_resetter`).
+workers (`order_status_pusher`, `pick_list_batch_pusher`).
 """
 
 from __future__ import annotations
