@@ -23,6 +23,7 @@ from .test_customer_email_lookup import *  # noqa: F401, F403
 from .test_delivery_note_autopopulate import *  # noqa: F401, F403
 from .test_delivery_note_status_push import *  # noqa: F401, F403
 from .test_delivery_type_classifier import *  # noqa: F401, F403
+from .test_intake_customer_resilience import *  # noqa: F401, F403
 from .test_intake_review_notifier import *  # noqa: F401, F403
 from .test_intake_soft_fail_items import *  # noqa: F401, F403
 from .test_ipay_gateway import *  # noqa: F401, F403

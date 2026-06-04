@@ -44,7 +44,7 @@ def handle(payload: dict, correlation_id: str) -> None:
 		return
 
 	settings = _load_settings()
-	customer_name = _resolve_customer_for_order(payload)
+	customer_name = _resolve_customer_for_order(payload, correlation_id)
 	shipping_address = _resolve_shipping_address(customer_name, payload)
 
 	sales_order = _build_sales_order_header(settings, customer_name, shipping_address, payload, correlation_id)
@@ -122,14 +122,54 @@ def _load_settings():
 	return settings
 
 
-def _resolve_customer_for_order(payload: dict) -> str:
-	"""Resolve (or create) the ERP Customer from the order payload's `user` sub-object."""
+def _resolve_customer_for_order(payload: dict, correlation_id: str) -> str:
+	"""Resolve (or create) the ERP Customer; fall back to walk-in rather than fail the order."""
 	user = payload.get("user") or {}
-	if not user.get("_id"):
-		raise WaveResolutionError("ORDER payload missing user._id; cannot resolve customer")
-	adapted = _adapt_user_to_customer_payload(user)
-	customer_name, _created, _source = find_or_create_customer(adapted)
-	return customer_name
+	if user.get("_id"):
+		try:
+			customer_name, _created, _source = find_or_create_customer(_adapt_user_to_customer_payload(user))
+			_ensure_customer_active(customer_name, payload, correlation_id)
+			return customer_name
+		except Exception as exc:
+			reason = f"customer resolution failed: {exc}"
+	else:
+		reason = "ORDER payload had no user._id"
+	return _fallback_customer(payload, correlation_id, reason)
+
+
+def _ensure_customer_active(customer_name: str, payload: dict, correlation_id: str) -> None:
+	"""Re-enable a disabled Customer (audited) so its order can be saved — Wave is the order's source of truth."""
+	if not frappe.db.get_value("Customer", customer_name, "disabled"):
+		return
+	frappe.db.set_value("Customer", customer_name, "disabled", 0, update_modified=False)
+	log_step(
+		correlation_id,
+		"Action Required",
+		"Warning",
+		doc_type="ORDER",
+		action="CREATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		error_message=f"Customer {customer_name!r} was disabled; re-enabled so the Wave order could be saved. Please review.",
+	)
+
+
+def _fallback_customer(payload: dict, correlation_id: str, reason: str) -> str:
+	"""Route to the configured walk-in Customer + log, so a customer-side problem never drops the order."""
+	walk_in = frappe.db.get_single_value("Wave Settings", "walk_in_customer")
+	if not walk_in:
+		raise WaveValidationError(f"{reason}; and Wave Settings.walk_in_customer is not configured")
+	log_step(
+		correlation_id,
+		"Action Required",
+		"Warning",
+		doc_type="ORDER",
+		action="CREATE",
+		wave_id=payload.get("_id"),
+		friendly_id=payload.get("friendlyId"),
+		error_message=f"{reason}; routed to walk-in customer {walk_in!r} for manual review."[:500],
+	)
+	return walk_in
 
 
 def _adapt_user_to_customer_payload(user: dict) -> dict:
@@ -177,6 +217,10 @@ def _build_sales_order_header(
 	correlation_id: str,
 ):
 	"""Return an unsaved Sales Order doc populated with header fields and the wave_* stamps."""
+	transaction_date = _date_from_iso(payload.get("createdAt")) or getdate()
+	delivery_date = _date_from_iso(
+		payload.get("timeSlotStart") or payload.get("timeSlotEnd") or payload.get("createdAt")
+	) or getdate()
 	return frappe.get_doc(
 		{
 			"doctype": "Sales Order",
@@ -185,10 +229,8 @@ def _build_sales_order_header(
 			"currency": settings.default_currency,
 			"selling_price_list": settings.default_price_list,
 			"set_warehouse": settings.default_warehouse,
-			"transaction_date": _date_from_iso(payload.get("createdAt")) or getdate(),
-			"delivery_date": _date_from_iso(
-				payload.get("timeSlotStart") or payload.get("timeSlotEnd") or payload.get("createdAt")
-			) or getdate(),
+			"transaction_date": transaction_date,
+			"delivery_date": max(delivery_date, transaction_date),
 			"order_type": "Sales",
 			"customer_address": shipping_address,
 			"shipping_address_name": shipping_address,
