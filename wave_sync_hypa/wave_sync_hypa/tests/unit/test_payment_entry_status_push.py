@@ -179,6 +179,7 @@ class TestOnPaymentEntrySubmit(FrappeTestCase):
 	def test_enqueues_when_resolver_returns_completed(self):
 		doc = _pe(references=[_ref("Sales Invoice", "SI-001")])
 		with (
+			patch.object(pe_handler, "_complete_on_payment_entry", return_value=False),
 			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A),
 			patch.object(
 				payment_status_resolver,
@@ -226,6 +227,7 @@ class TestOnPaymentEntrySubmit(FrappeTestCase):
 			return payment_status_resolver.STATUS_COMPLETED if wave_order_id == WAVE_ID_A else None
 
 		with (
+			patch.object(pe_handler, "_complete_on_payment_entry", return_value=False),
 			patch.object(frappe.db, "get_value", side_effect=_gv),
 			patch.object(payment_status_resolver, "resolve_status_for_wave_order", side_effect=_resolve),
 			patch.object(payment_status_pusher, "enqueue_payment_status_push") as mock_enqueue,
@@ -261,6 +263,7 @@ class TestOnPaymentEntrySubmit(FrappeTestCase):
 		"""References without wave_order_ids but doc has one stamped -> resolver consulted on that id."""
 		doc = _pe(references=[_ref("Sales Invoice", "SI-001")], wave_order_id=WAVE_ID_A)
 		with (
+			patch.object(pe_handler, "_complete_on_payment_entry", return_value=False),
 			patch.object(frappe.db, "get_value", return_value=None),
 			patch.object(
 				payment_status_resolver,

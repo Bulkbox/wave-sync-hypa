@@ -31,6 +31,12 @@ frappe.ui.form.on("Sales Order", {
 		if (!frm.is_new() && is_draft && frm.doc.wave_order_id) {
 			_add_resync_status_button(frm);
 		}
+		// "Mark Delivered on Wave" — operator override to push COMPLETED for
+		// non-Shipday orders (pickup / walk-in / manual delivery). Submitted,
+		// Wave-linked orders only.
+		if (is_submitted && frm.doc.wave_order_id) {
+			_add_mark_delivered_button(frm);
+		}
 		// "Push to Wave" / "Send Order to Wave" surfaces only for ERP-side
 		// orders that haven't been pushed yet. Submitted-only so an operator
 		// can't push a draft they might still be editing. Wave-webhook-originated
@@ -131,6 +137,55 @@ function _call_resync_status_endpoint(frm) {
 					r.message.correlation_id,
 				]),
 				indicator: "green",
+			});
+		},
+	});
+}
+
+// "Mark Delivered on Wave" — operator-triggered COMPLETED push for non-Shipday
+// orders (pickup, walk-in, manual delivery). Visible on any submitted Wave-linked
+// SO. The server reuses the standard outbound dispatch and is idempotent on
+// terminal orders.
+function _add_mark_delivered_button(frm) {
+	frm.add_custom_button(
+		__("Mark Delivered on Wave"),
+		() => _confirm_mark_delivered(frm),
+		__("Wave")
+	);
+}
+
+function _confirm_mark_delivered(frm) {
+	frappe.confirm(
+		__(
+			"Push Wave status COMPLETED for order {0}? Use this for pickup / walk-in / manually-delivered orders that don't go through Shipday.",
+			[frm.doc.name]
+		),
+		() => _call_mark_delivered_endpoint(frm)
+	);
+}
+
+function _call_mark_delivered_endpoint(frm) {
+	frappe.call({
+		method: "wave_sync_hypa.wave_sync_hypa.api.sales_order.mark_completed_on_wave",
+		args: { sales_order: frm.doc.name },
+		freeze: true,
+		freeze_message: __("Pushing COMPLETED to Wave..."),
+		callback(r) {
+			const result = r.message || {};
+			if (result.ok) {
+				frappe.show_alert({
+					message: __("Wave COMPLETED queued for order {0}. Correlation: {1}", [
+						result.wave_order_id,
+						result.correlation_id,
+					]),
+					indicator: "green",
+				});
+				return;
+			}
+			frappe.msgprint({
+				title: __("Could not mark delivered"),
+				message: frappe.utils.escape_html(result.reason || __("Unknown error.")),
+				indicator: "orange",
 			});
 		},
 	});

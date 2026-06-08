@@ -30,6 +30,7 @@
   "outbound_stock_sync_enabled",
   "outbound_stock_caps_max_quantity_enabled",
   "outbound_order_status_sync_enabled",
+  "wave_non_shipday_completion_mode",
   "pick_list_batch_ids_push_enabled",
   "picker_identifier_source",
   "pick_list_erp_submit_lockdown_enabled",
@@ -221,6 +222,14 @@
    "fieldname": "outbound_order_status_sync_enabled",
    "fieldtype": "Check",
    "label": "Outbound Order Status Sync Enabled"
+  },
+  {
+   "default": "Manual only",
+   "description": "How a non-Shipday Wave order (pickup, walk-in, manual delivery) reaches Wave's COMPLETED status. 'Manual only' = only the 'Mark Delivered on Wave' button on the Sales Order completes it. 'On Payment Entry submit' = a fully-settled Payment Entry also pushes the order to COMPLETED. Shipday-tracked deliveries always complete via the Shipday Delivered signal regardless of this setting; keep 'Manual only' if you rely on Shipday for delivery completion (payment can precede delivery). The button is always available.",
+   "fieldname": "wave_non_shipday_completion_mode",
+   "fieldtype": "Select",
+   "label": "Non-Shipday Order Completion",
+   "options": "Manual only\nOn Payment Entry submit"
   },
   {
    "default": "0",
