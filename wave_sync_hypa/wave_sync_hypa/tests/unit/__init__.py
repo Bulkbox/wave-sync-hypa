@@ -60,3 +60,4 @@ from .test_wave_comments_stamping import *  # noqa: F401, F403
 from .test_wave_customer_resolver import *  # noqa: F401, F403
 from .test_wave_order_builder import *  # noqa: F401, F403
 from .test_wave_order_creator import *  # noqa: F401, F403
+from .test_wave_settings_preflight import *  # noqa: F401, F403

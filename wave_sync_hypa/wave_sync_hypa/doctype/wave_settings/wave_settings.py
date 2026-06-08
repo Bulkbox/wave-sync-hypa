@@ -85,6 +85,78 @@ class WaveSettings(Document):
 		self._validate_positive_int("log_retention_days")
 		self._validate_enabled_requires_keys()
 		self._validate_inbound_api_key_format()
+		self._validate_intake_defaults()
+
+	def _validate_intake_defaults(self) -> None:
+		"""Block saves where a configured order-intake default points at an unusable record.
+
+		These five drive every ORDER.CREATE; a typo'd / disabled / wrong-company
+		value would otherwise save fine and then hard-fail every order at Sales
+		Order insert. When the integration is enabled they must also be present
+		(can't go live with a hole); while disabled, blanks are allowed so initial
+		setup isn't blocked, but any value that IS set is still validated.
+		"""
+		required = ("default_company", "default_warehouse", "default_price_list", "default_currency", "walk_in_customer")
+		problems: list[str] = []
+
+		if self.get("enabled"):
+			problems += [
+				_("{0} is required to enable the integration.").format(_(self.meta.get_label(field)))
+				for field in required
+				if not self.get(field)
+			]
+
+		company = self.get("default_company")
+		if company and not frappe.db.exists("Company", company):
+			problems.append(_("Default Company {0} does not exist.").format(company))
+
+		warehouse = self.get("default_warehouse")
+		if warehouse:
+			wh = frappe.db.get_value("Warehouse", warehouse, ["is_group", "disabled", "company"], as_dict=True)
+			if not wh:
+				problems.append(_("Default Warehouse {0} does not exist.").format(warehouse))
+			elif wh.is_group:
+				problems.append(_("Default Warehouse {0} is a group warehouse; choose a leaf warehouse.").format(warehouse))
+			elif wh.disabled:
+				problems.append(_("Default Warehouse {0} is disabled.").format(warehouse))
+			elif company and wh.company != company:
+				problems.append(
+					_("Default Warehouse {0} belongs to {1}, not Default Company {2}.").format(warehouse, wh.company, company)
+				)
+
+		price_list = self.get("default_price_list")
+		if price_list:
+			pl = frappe.db.get_value("Price List", price_list, ["enabled", "selling"], as_dict=True)
+			if not pl:
+				problems.append(_("Default Price List {0} does not exist.").format(price_list))
+			elif not pl.enabled:
+				problems.append(_("Default Price List {0} is disabled.").format(price_list))
+			elif not pl.selling:
+				problems.append(_("Default Price List {0} is not a Selling price list.").format(price_list))
+
+		currency = self.get("default_currency")
+		if currency:
+			cur = frappe.db.get_value("Currency", currency, ["enabled"], as_dict=True)
+			if not cur:
+				problems.append(_("Default Currency {0} does not exist.").format(currency))
+			elif not cur.enabled:
+				problems.append(_("Default Currency {0} is disabled.").format(currency))
+
+		walk_in = self.get("walk_in_customer")
+		if walk_in:
+			wc = frappe.db.get_value("Customer", walk_in, ["disabled"], as_dict=True)
+			if wc is None:
+				problems.append(_("Walk-in Customer {0} does not exist.").format(walk_in))
+			elif wc.disabled:
+				problems.append(_("Walk-in Customer {0} is disabled.").format(walk_in))
+
+		if problems:
+			frappe.throw(
+				_("Wave Settings cannot be saved — fix the order-intake defaults:")
+				+ "<br>&bull; "
+				+ "<br>&bull; ".join(problems),
+				title=_("Invalid Wave intake configuration"),
+			)
 
 	def on_update(self):
 		"""Append a Wave Sync Log audit row counting child-table rows after every save.
