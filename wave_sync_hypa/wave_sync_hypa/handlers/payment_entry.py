@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import frappe
 
+from wave_sync_hypa.wave_sync_hypa.handlers import order_status
 from wave_sync_hypa.wave_sync_hypa.services import (
 	payment_status_pusher,
 	payment_status_resolver,
@@ -132,6 +133,7 @@ def on_payment_entry_submit(doc, method=None) -> None:
 	if not wave_ids and doc.get("wave_order_id"):
 		wave_ids = [doc.wave_order_id]
 	correlation_id = new_correlation_id()
+	settled_orders: list[str] = []
 	for wave_order_id in wave_ids:
 		status = payment_status_resolver.resolve_status_for_wave_order(doc, wave_order_id)
 		if status is None:
@@ -154,6 +156,23 @@ def on_payment_entry_submit(doc, method=None) -> None:
 			status,
 			correlation_id=correlation_id,
 		)
+		settled_orders.append(wave_order_id)
+
+	# Non-Shipday completion (issue #118): a fully-settled order optionally
+	# advances Wave's order status to COMPLETED on payment. Manager opt-in via
+	# Wave Settings; default off so Shipday-tracked deliveries are untouched.
+	if settled_orders and _complete_on_payment_entry():
+		order_status.dispatch_with_wave_order_ids(
+			doc, "payment_entry_completion", settled_orders, forced_payload={"status": "COMPLETED"}
+		)
+
+
+def _complete_on_payment_entry() -> bool:
+	"""Manager opt-in: push Wave status=COMPLETED when a fully-settled PE submits."""
+	return (
+		frappe.get_cached_doc("Wave Settings").get("wave_non_shipday_completion_mode")
+		== "On Payment Entry submit"
+	)
 
 
 def validate_payment_before_submit(doc, method=None) -> None:
