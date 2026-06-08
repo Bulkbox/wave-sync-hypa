@@ -7,8 +7,11 @@ concern and the operator UI endpoints have their own home.
 import frappe
 from frappe import _
 
+from wave_sync_hypa.wave_sync_hypa.handlers import order_status
 from wave_sync_hypa.wave_sync_hypa.services import ipay_payment_sync, wave_order_creator
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
+
+WAVE_STATUS_COMPLETED = "COMPLETED"
 
 
 @frappe.whitelist()
@@ -74,6 +77,33 @@ def verify_ipay_payment(sales_order: str) -> dict:
 	result["correlation_id"] = correlation_id
 	frappe.db.commit()
 	return result
+
+
+@frappe.whitelist()
+def mark_completed_on_wave(sales_order: str) -> dict:
+	"""Operator-triggered push of Wave status=COMPLETED for a non-Shipday order.
+
+	Invoked by the 'Mark Delivered on Wave' button. Covers pickup, walk-in, and
+	manually-completed deliveries — the paths Shipday's Delivered signal doesn't.
+	Reuses the standard outbound dispatch (honours the master + outbound-status
+	switches); idempotent, since re-pushing COMPLETED on a terminal Wave order
+	is soft-skipped by the pusher.
+	"""
+	correlation_id = new_correlation_id()
+	doc = frappe.get_doc("Sales Order", sales_order)
+	doc.check_permission("write")
+	wave_order_id = (doc.get("wave_order_id") or "").strip()
+	if not wave_order_id:
+		return {
+			"ok": False,
+			"reason": _("This Sales Order is not linked to a Wave order."),
+			"correlation_id": correlation_id,
+		}
+	order_status.dispatch_with_wave_order_ids(
+		doc, "manual_mark_completed", [wave_order_id], forced_payload={"status": WAVE_STATUS_COMPLETED}
+	)
+	frappe.db.commit()
+	return {"ok": True, "wave_order_id": wave_order_id, "correlation_id": correlation_id}
 
 
 def _clear_flag(sales_order: str) -> None:
