@@ -320,16 +320,26 @@ def _build_item_line(item_code: str, product: dict, sales_order) -> dict:
 	"""Shape a Sales Order item dict from a resolved Wave product line."""
 	return {
 		"item_code": item_code,
-		"qty": product.get("quantity") or 1,
+		"qty": _line_units(product),
 		"delivery_date": sales_order.delivery_date,
 	}
+
+
+def _line_units(product: dict) -> float:
+	"""Physical units for an SO line = Wave's cart quantity x the product's purchase step.
+
+	Wave's order-line `quantity` is the count of purchase *steps* the shopper
+	selected, not the unit count; the true quantity is that x `stepToUom` (the
+	product's purchase step). A step of 1 leaves the quantity unchanged.
+	"""
+	return (product.get("quantity") or 1) * (product.get("stepToUom") or 1)
 
 
 def _unresolved_product_entry(sku: str, product: dict, exc: Exception) -> dict:
 	"""Capture an unresolvable Wave product line for downstream comments + ToDos."""
 	return {
 		"sku": sku,
-		"quantity": product.get("quantity") or 1,
+		"quantity": _line_units(product),
 		"wave_product_id": product.get("productId"),
 		"error": str(exc),
 	}
@@ -579,7 +589,19 @@ def _log_skipped_existing(correlation_id: str, payload: dict, sales_order_name: 
 
 
 def _log_items_resolved(correlation_id: str, payload: dict, count: int) -> None:
-	"""Record a Resolved Items log row summarising how many product lines the handler appended."""
+	"""Record a Resolved Items log row; surface any line where a purchase step was applied.
+
+	Lines with stepToUom > 1 had their qty multiplied (see _line_units); listing
+	them keeps the stock/price impact auditable without spamming step-1 orders.
+	"""
+	body = {"product_line_count": count}
+	stepped = [
+		{"sku": p.get("sku"), "quantity": p.get("quantity"), "step": p.get("stepToUom"), "units": _line_units(p)}
+		for p in (payload.get("products") or [])
+		if (p.get("stepToUom") or 1) != 1
+	]
+	if stepped:
+		body["purchase_step_applied"] = stepped
 	log_step(
 		correlation_id,
 		"Resolved Items",
@@ -589,7 +611,7 @@ def _log_items_resolved(correlation_id: str, payload: dict, count: int) -> None:
 		wave_id=payload.get("_id"),
 		wave_updated_at=payload.get("updatedAt"),
 		friendly_id=payload.get("friendlyId"),
-		response_body={"product_line_count": count},
+		response_body=body,
 	)
 
 

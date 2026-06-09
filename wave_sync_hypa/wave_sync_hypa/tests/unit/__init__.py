@@ -32,6 +32,7 @@ from .test_ipay_payment_sync import *  # noqa: F401, F403
 from .test_item_resolver import *  # noqa: F401, F403
 from .test_json_tools import *  # noqa: F401, F403
 from .test_money import *  # noqa: F401, F403
+from .test_order_create_quantity import *  # noqa: F401, F403
 from .test_order_status_push import *  # noqa: F401, F403
 from .test_payment_entry_status_push import *  # noqa: F401, F403
 from .test_payment_metadata_intake import *  # noqa: F401, F403
