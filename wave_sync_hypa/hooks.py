@@ -91,7 +91,9 @@ doctype_list_js = {
 # ------------
 
 # before_install = "wave_sync_hypa.install.before_install"
-# after_install = "wave_sync_hypa.install.after_install"
+# Seed patches are marked done-without-running on a fresh install; this hook
+# actually executes them so a new site comes up fully configured. See install.py.
+after_install = "wave_sync_hypa.install.after_install"
 
 # Uninstallation
 # ------------
