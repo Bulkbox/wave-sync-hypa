@@ -1,0 +1,43 @@
+name: Release on version bump
+
+# When a version bump lands on main (a change to wave_sync_hypa/__init__.py),
+# create the matching vX.Y.Z git tag + GitHub Release with auto-generated
+# notes. Idempotent: a push that touches __init__.py without changing the
+# version (or a re-run) skips, because the release already exists.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "wave_sync_hypa/__init__.py"
+
+permissions:
+  contents: write
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read __version__
+        id: ver
+        run: |
+          version=$(grep -oP '__version__\s*=\s*"\K[^"]+' wave_sync_hypa/__init__.py)
+          [ -n "$version" ] || { echo "::error::could not read __version__ from wave_sync_hypa/__init__.py"; exit 1; }
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag + release if new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.ver.outputs.tag }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag already released — nothing to do."
+            exit 0
+          fi
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --generate-notes
