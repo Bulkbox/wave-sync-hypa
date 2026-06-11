@@ -7,8 +7,11 @@ missing (legacy payloads) it falls back to address.street presence.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from frappe.tests.utils import FrappeTestCase
 
+from wave_sync_hypa.wave_sync_hypa.handlers import order_create as oc
 from wave_sync_hypa.wave_sync_hypa.handlers.order_create import _classify_delivery_type
 
 
@@ -45,3 +48,29 @@ class TestClassifyDeliveryType(FrappeTestCase):
 		"""Address present but no street -> pickup (e.g. dropoff metadata only)."""
 		payload = {"deliveryService": "", "address": {"street": ""}}
 		self.assertEqual(_classify_delivery_type(payload), "Pickup")
+
+
+class TestDeliveryTimeWindow(FrappeTestCase):
+	"""_delivery_time_window renders Wave's UTC slot as a 'HH:MM - HH:MM' window in the site timezone."""
+
+	def test_window_rendered_in_site_timezone(self):
+		# Nairobi is UTC+3: 06:00Z -> 09:00, 09:00Z -> 12:00.
+		payload = {
+			"timeSlotStart": "2026-06-10T06:00:00.000Z",
+			"timeSlotEnd": "2026-06-10T09:00:00.000Z",
+		}
+		with patch.object(oc, "get_system_timezone", return_value="Africa/Nairobi"):
+			self.assertEqual(oc._delivery_time_window(payload), "09:00 - 12:00")
+
+	def test_only_start_present_returns_single_time(self):
+		with patch.object(oc, "get_system_timezone", return_value="UTC"):
+			self.assertEqual(
+				oc._delivery_time_window({"timeSlotStart": "2026-06-10T06:00:00.000Z"}), "06:00"
+			)
+
+	def test_no_slot_returns_empty(self):
+		self.assertEqual(oc._delivery_time_window({}), "")
+
+	def test_unparseable_value_returns_empty(self):
+		with patch.object(oc, "get_system_timezone", return_value="UTC"):
+			self.assertEqual(oc._delivery_time_window({"timeSlotStart": "not-a-datetime"}), "")

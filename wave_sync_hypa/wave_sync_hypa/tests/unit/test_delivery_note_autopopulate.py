@@ -31,6 +31,8 @@ def _dn(items: list | None = None, driver: str = "") -> SimpleNamespace:
 		name="DN-2026-0001",
 		delivery_date=None,
 		driver=driver,
+		wave_delivery_type=None,
+		wave_delivery_time=None,
 	)
 	values = {"items": items or [], "wave_order_id": ""}
 	doc.get = lambda key, default=None: values.get(key, default)
@@ -51,9 +53,19 @@ def _settings(pickup_driver: str = "") -> MagicMock:
 	return settings
 
 
-def _so_row(name: str = "SAL-ORD-001", delivery_date=date(2026, 5, 20), delivery_type: str = "Delivery") -> dict:
+def _so_row(
+	name: str = "SAL-ORD-001",
+	delivery_date=date(2026, 5, 20),
+	delivery_type: str = "Delivery",
+	delivery_time: str = "09:00 - 12:00",
+) -> dict:
 	"""Row matching what _read_wave_so returns (as_dict=True)."""
-	return {"name": name, "delivery_date": delivery_date, "wave_delivery_type": delivery_type}
+	return {
+		"name": name,
+		"delivery_date": delivery_date,
+		"wave_delivery_type": delivery_type,
+		"wave_delivery_time": delivery_time,
+	}
 
 
 class TestAutopopulateFromWaveSo(FrappeTestCase):
@@ -112,6 +124,25 @@ class TestAutopopulateFromWaveSo(FrappeTestCase):
 		mock_settings.assert_not_called()
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(dn_handler.STEP_AUTOPOPULATED, steps)
+
+	def test_stamps_wave_delivery_type_and_time_onto_dn(self):
+		"""Both wave_delivery_type and wave_delivery_time are carried from the SO onto the DN."""
+		doc = _dn(items=[_item("SAL-ORD-001")])
+		so_row = _so_row(delivery_type="Delivery", delivery_time="09:00 - 12:00")
+
+		def _get_value_dispatch(*args, **kwargs):
+			if args[0] == "Sales Order" and args[1] == "SAL-ORD-001":
+				return "wave-id-AAA"
+			return so_row
+
+		with (
+			patch.object(frappe.db, "get_value", side_effect=_get_value_dispatch),
+			patch.object(frappe, "get_cached_doc"),
+			patch.object(dn_handler, "log_step"),
+		):
+			dn_handler.autopopulate_from_wave_so(doc)
+		self.assertEqual(doc.wave_delivery_type, "Delivery")
+		self.assertEqual(doc.wave_delivery_time, "09:00 - 12:00")
 
 	def test_pickup_type_with_configured_driver_stamps_both(self):
 		doc = _dn(items=[_item("SAL-ORD-002")])
