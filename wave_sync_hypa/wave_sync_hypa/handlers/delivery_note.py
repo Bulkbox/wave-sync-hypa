@@ -133,6 +133,15 @@ def autopopulate_from_wave_so(doc, method=None) -> None:
 		doc.delivery_date = primary.get("delivery_date")
 		autopopulated["delivery_date"] = str(primary.get("delivery_date"))
 
+	# Carry the Wave delivery type + time slot onto the DN so they travel with the
+	# fulfilment document, not just the Sales Order.
+	if primary.get("wave_delivery_type"):
+		doc.wave_delivery_type = primary.get("wave_delivery_type")
+		autopopulated["wave_delivery_type"] = primary.get("wave_delivery_type")
+	if primary.get("wave_delivery_time"):
+		doc.wave_delivery_time = primary.get("wave_delivery_time")
+		autopopulated["wave_delivery_time"] = primary.get("wave_delivery_time")
+
 	delivery_type = (primary.get("wave_delivery_type") or "").strip()
 	if delivery_type == "Pickup" and not (doc.driver or ""):
 		settings = frappe.get_cached_doc("Wave Settings")
@@ -146,11 +155,11 @@ def autopopulate_from_wave_so(doc, method=None) -> None:
 
 
 def _read_wave_so(wave_order_id: str):
-	"""Return the Sales Order's delivery_date + wave_delivery_type via one DB read, or None."""
+	"""Return the SO's delivery_date + wave_delivery_type + wave_delivery_time via one DB read, or None."""
 	row = frappe.db.get_value(
 		"Sales Order",
 		{"wave_order_id": wave_order_id},
-		["name", "delivery_date", "wave_delivery_type"],
+		["name", "delivery_date", "wave_delivery_type", "wave_delivery_time"],
 		as_dict=True,
 	)
 	return row or None
@@ -174,6 +183,11 @@ def _maybe_log_heterogeneous_wave_sources(doc, wave_order_ids: list[str], primar
 			divergences.append(
 				f"{wave_order_id}: wave_delivery_type {other.get('wave_delivery_type')!r} "
 				f"vs primary {primary.get('wave_delivery_type')!r}"
+			)
+		if (other.get("wave_delivery_time") or "") != (primary.get("wave_delivery_time") or ""):
+			divergences.append(
+				f"{wave_order_id}: wave_delivery_time {other.get('wave_delivery_time')!r} "
+				f"vs primary {primary.get('wave_delivery_time')!r}"
 			)
 	if not divergences:
 		return

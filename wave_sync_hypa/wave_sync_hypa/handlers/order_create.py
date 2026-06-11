@@ -8,8 +8,10 @@ because the fee amounts are variable per order and come from Wave in minor
 units (cents).
 """
 
+from datetime import datetime
+
 import frappe
-from frappe.utils import escape_html, getdate
+from frappe.utils import convert_utc_to_timezone, escape_html, get_system_timezone, getdate
 
 from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_new
 from wave_sync_hypa.wave_sync_hypa.resolvers.customer_resolver import find_or_create_customer
@@ -218,9 +220,13 @@ def _build_sales_order_header(
 ):
 	"""Return an unsaved Sales Order doc populated with header fields and the wave_* stamps."""
 	transaction_date = _date_from_iso(payload.get("createdAt")) or getdate()
-	delivery_date = _date_from_iso(
+	# Delivery date is the LOCAL date of the slot (same site-tz conversion as
+	# wave_delivery_time), so the two never disagree across the UTC/local midnight
+	# boundary.
+	slot_local = _local_datetime(
 		payload.get("timeSlotStart") or payload.get("timeSlotEnd") or payload.get("createdAt")
-	) or getdate()
+	)
+	delivery_date = slot_local.date() if slot_local else getdate()
 	return frappe.get_doc(
 		{
 			"doctype": "Sales Order",
@@ -240,6 +246,7 @@ def _build_sales_order_header(
 			"wave_status": payload.get("status"),
 			"wave_correlation_id": correlation_id,
 			"wave_delivery_type": _classify_delivery_type(payload),
+			"wave_delivery_time": _delivery_time_window(payload),
 		}
 	)
 
@@ -262,6 +269,38 @@ def _classify_delivery_type(payload: dict) -> str:
 	if isinstance(address, dict) and (address.get("street") or "").strip():
 		return "Delivery"
 	return "Pickup"
+
+
+def _delivery_time_window(payload: dict) -> str:
+	"""Render Wave's delivery slot as a local 'HH:MM - HH:MM' window (empty when absent).
+
+	Wave sends the slot bounds (timeSlotStart/timeSlotEnd) as UTC ISO datetimes;
+	we render them in the site timezone so operators see the slot the customer
+	chose. A missing slot or parse failure yields '' — never blocks intake.
+	"""
+	start = _local_datetime(payload.get("timeSlotStart"))
+	end = _local_datetime(payload.get("timeSlotEnd"))
+	start_s = start.strftime("%H:%M") if start else ""
+	end_s = end.strftime("%H:%M") if end else ""
+	if start_s and end_s:
+		return f"{start_s} - {end_s}"
+	return start_s or end_s or ""
+
+
+def _local_datetime(value):
+	"""Parse a Wave UTC ISO datetime and return it in the site timezone, or None on failure.
+
+	Reuses Frappe's convert_utc_to_timezone (pytz; falls back to the original
+	timestamp on an unknown site timezone). Used for BOTH delivery_date and the
+	wave_delivery_time window so the date and time can never disagree.
+	"""
+	if not value:
+		return None
+	try:
+		dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+		return convert_utc_to_timezone(dt, get_system_timezone())
+	except Exception:
+		return None
 
 
 def _apply_tax_template(sales_order, settings) -> dict | None:
