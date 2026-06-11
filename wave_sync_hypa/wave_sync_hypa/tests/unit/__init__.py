@@ -19,6 +19,7 @@ requires one line here.
 from .test_correlation import *  # noqa: F401, F403
 from .test_credit_note_classifier import *  # noqa: F401, F403
 from .test_customer_business_classification import *  # noqa: F401, F403
+from .test_customer_create_side_effects import *  # noqa: F401, F403
 from .test_customer_email_lookup import *  # noqa: F401, F403
 from .test_delivery_note_autopopulate import *  # noqa: F401, F403
 from .test_delivery_note_status_push import *  # noqa: F401, F403

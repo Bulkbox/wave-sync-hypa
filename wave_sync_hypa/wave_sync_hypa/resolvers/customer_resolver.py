@@ -38,6 +38,7 @@ Address is labelled "Business Address" and typed `Office`.
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_new
+from wave_sync_hypa.wave_sync_hypa.resolvers.contact_resolver import upsert_contact
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveResolutionError
 
 
@@ -286,6 +287,11 @@ def _create_customer_from_wave(payload: dict) -> str:
 	B2B payloads land here too. `_resolve_*` helpers below branch on
 	`customerType`; for b2c they return the same values the old code did so
 	the existing flow is preserved.
+
+	On creation we also seed the credit limit (from Wave Settings, default
+	company) and create the primary Contact — both happen ONLY here, so an
+	existing customer's credit limit and contact are never overwritten on a
+	later webhook/order.
 	"""
 	doc = frappe.get_doc(
 		{
@@ -299,6 +305,7 @@ def _create_customer_from_wave(payload: dict) -> str:
 			"wave_integrator_id": payload.get("integratorId"),
 			"is_wave_customer": 1,
 			"require_tax_id": 0,
+			"credit_limits": _initial_credit_limits(),
 		}
 	)
 	# Wave customers arrive without KRA PINs. A site-level Property Setter from
@@ -307,7 +314,24 @@ def _create_customer_from_wave(payload: dict) -> str:
 	# mandatory check so the insert can land. Accounting can add the PIN later.
 	doc.flags.ignore_mandatory = True
 	doc.insert(ignore_permissions=True)
+	# Mirror the address flow: create + link the primary Contact from whatever
+	# identity Wave gave us (name / email / phone). Same payload shape as the
+	# CUSTOMER webhook, so order-originated customers get a Contact too.
+	upsert_contact(doc.name, payload)
 	return doc.name
+
+
+def _initial_credit_limits() -> list[dict]:
+	"""Return a one-row credit-limit table for the default company, from Wave Settings.
+
+	Empty (no row) when either the amount or the Default Company is unset — we
+	never fabricate a credit limit without a company to scope it to.
+	"""
+	amount = _default("default_customer_credit_limit")
+	company = _default("default_company")
+	if not amount or not company:
+		return []
+	return [{"company": company, "credit_limit": amount}]
 
 
 def _resolve_customer_type(payload: dict) -> str | None:
