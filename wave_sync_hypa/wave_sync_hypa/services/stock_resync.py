@@ -151,10 +151,10 @@ def _iter_eligible_item_codes(warehouse: str, item_codes: list[str] | None) -> I
 
 
 def _paginate_eligible_items(warehouse: str, item_codes: list[str] | None) -> Iterator[list[tuple]]:
-	"""Page through Item rows in stable order; warehouse is reserved for future qty pre-checks."""
+	"""Page through eligible (item_code,) rows in stable order, scoped to `warehouse`."""
 	offset = 0
 	while True:
-		chunk = _fetch_chunk(item_codes, offset, ITEM_CHUNK_SIZE)
+		chunk = _fetch_chunk(warehouse, item_codes, offset, ITEM_CHUNK_SIZE)
 		if not chunk:
 			return
 		yield chunk
@@ -163,27 +163,44 @@ def _paginate_eligible_items(warehouse: str, item_codes: list[str] | None) -> It
 		offset += ITEM_CHUNK_SIZE
 
 
-def _fetch_chunk(item_codes: list[str] | None, offset: int, limit: int) -> list[tuple]:
-	"""Pull one page of (item_code,) rows for enabled stock items; optional explicit-name filter."""
-	filters: dict = {"disabled": 0, "is_stock_item": 1}
+def _eligibility_sql(warehouse: str, item_codes: list[str] | None) -> tuple[str, dict]:
+	"""Shared WHERE clause + params: enabled stock items that have a Bin in `warehouse`.
+
+	The Bin join is what scopes the resync to the configured warehouse — items
+	stocked only in other warehouses have no Bin here and are excluded, so the
+	resync never touches products that don't belong to the Wave warehouse.
+	"""
+	conditions = ["i.disabled = 0", "i.is_stock_item = 1", "b.warehouse = %(warehouse)s"]
+	params: dict = {"warehouse": warehouse}
 	if item_codes is not None:
-		filters["name"] = ["in", item_codes]
-	return [
-		(row["name"],)
-		for row in frappe.get_all(
-			"Item",
-			filters=filters,
-			fields=["name"],
-			order_by="name asc",
-			start=offset,
-			page_length=limit,
-		)
-	]
+		conditions.append("b.item_code IN %(item_codes)s")
+		params["item_codes"] = tuple(item_codes)
+	return " AND ".join(conditions), params
+
+
+def _fetch_chunk(warehouse: str, item_codes: list[str] | None, offset: int, limit: int) -> list[tuple]:
+	"""Pull one page of (item_code,) for enabled stock items with a Bin in `warehouse`."""
+	where, params = _eligibility_sql(warehouse, item_codes)
+	params.update({"limit": limit, "offset": offset})
+	rows = frappe.db.sql(
+		f"""
+		SELECT b.item_code
+		FROM `tabBin` b
+		JOIN `tabItem` i ON i.name = b.item_code
+		WHERE {where}
+		ORDER BY b.item_code ASC
+		LIMIT %(limit)s OFFSET %(offset)s
+		""",
+		params,
+		as_dict=True,
+	)
+	return [(row["item_code"],) for row in rows]
 
 
 def count_eligible_items(warehouse: str, item_codes: list[str] | None = None) -> int:
-	"""Count the items a resync would queue; used at click time for the operator estimate."""
-	filters: dict = {"disabled": 0, "is_stock_item": 1}
-	if item_codes is not None:
-		filters["name"] = ["in", item_codes]
-	return frappe.db.count("Item", filters=filters)
+	"""Count items a resync would queue: enabled stock items with a Bin in `warehouse`."""
+	where, params = _eligibility_sql(warehouse, item_codes)
+	return frappe.db.sql(
+		f"SELECT COUNT(*) FROM `tabBin` b JOIN `tabItem` i ON i.name = b.item_code WHERE {where}",
+		params,
+	)[0][0]

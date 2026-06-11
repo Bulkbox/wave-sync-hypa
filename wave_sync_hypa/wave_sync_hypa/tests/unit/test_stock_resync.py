@@ -110,6 +110,20 @@ class TestStartFullResyncEndpoint(FrappeTestCase):
 				endpoint.start_full_resync()
 		mock_enqueue.assert_not_called()
 
+	def test_refuses_when_default_warehouse_missing(self):
+		"""Empty default_warehouse → throws before the API-credential checks, no enqueue."""
+		# app_id is also blank, so this only passes if warehouse is checked first.
+		settings = _stub_settings(default_warehouse="", app_id="")
+		with (
+			patch.object(frappe, "only_for"),
+			patch.object(frappe, "get_doc", return_value=settings),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+		):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				endpoint.start_full_resync()
+		self.assertIn("warehouse", str(cm.exception).lower())
+		mock_enqueue.assert_not_called()
+
 	def test_refuses_empty_explicit_list(self):
 		"""item_codes=[] → throws (operator probably meant 'all', but be explicit)."""
 		settings = _stub_settings()
@@ -127,10 +141,10 @@ class TestResyncCoordinator(FrappeTestCase):
 	def test_enqueues_one_job_per_eligible_item_with_shared_batch(self):
 		"""Three items returned by Item query → three frappe.enqueue calls, all carrying batch_id."""
 		settings = _stub_settings()
-		items = [{"name": f"SKU-{i}"} for i in range(3)]
+		items = [{"item_code": f"SKU-{i}"} for i in range(3)]
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe, "get_all", side_effect=[items, []]),
+			patch.object(frappe.db, "sql", side_effect=[items, []]),
 			patch.object(frappe, "enqueue") as mock_enqueue,
 			patch.object(stock_resync, "log_step"),
 		):
@@ -145,10 +159,10 @@ class TestResyncCoordinator(FrappeTestCase):
 	def test_logs_started_and_completed_with_counters(self):
 		"""Successful run logs started + completed; completed carries queued / enqueue_failed counters."""
 		settings = _stub_settings()
-		items = [{"name": "SKU-1"}, {"name": "SKU-2"}]
+		items = [{"item_code": "SKU-1"}, {"item_code": "SKU-2"}]
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe, "get_all", side_effect=[items, []]),
+			patch.object(frappe.db, "sql", side_effect=[items, []]),
 			patch.object(frappe, "enqueue"),
 			patch.object(stock_resync, "log_step") as mock_log,
 		):
@@ -166,7 +180,7 @@ class TestResyncCoordinator(FrappeTestCase):
 	def test_one_enqueue_failure_does_not_stop_loop(self):
 		"""If frappe.enqueue raises on item #2, items #3 + #4 are still queued and the failure is logged."""
 		settings = _stub_settings()
-		items = [{"name": f"SKU-{i}"} for i in range(4)]
+		items = [{"item_code": f"SKU-{i}"} for i in range(4)]
 
 		call_count = {"n": 0}
 
@@ -178,7 +192,7 @@ class TestResyncCoordinator(FrappeTestCase):
 
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe, "get_all", side_effect=[items, []]),
+			patch.object(frappe.db, "sql", side_effect=[items, []]),
 			patch.object(frappe, "enqueue", side_effect=flaky_enqueue),
 			patch.object(stock_resync, "log_step") as mock_log,
 		):
@@ -228,26 +242,27 @@ class TestResyncCoordinator(FrappeTestCase):
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(stock_resync.STEP_RESYNC_ABORTED, steps)
 
-	def test_explicit_codes_passes_filter_to_query(self):
-		"""When called with item_codes, the Item query carries an `in` filter for them."""
+	def test_explicit_codes_scopes_query_to_warehouse_and_codes(self):
+		"""Explicit item_codes → the eligibility SQL is scoped to the default warehouse + an IN filter."""
 		settings = _stub_settings()
 		captured: dict = {}
 
-		def capture_get_all(doctype, **kwargs):
-			captured["filters"] = kwargs.get("filters")
-			return [{"name": "ALPHA"}]
+		def capture_sql(query, params=None, **kwargs):
+			captured["query"] = query
+			captured["params"] = params
+			return [{"item_code": "ALPHA"}]
 
 		with (
 			patch.object(frappe, "get_cached_doc", return_value=settings),
-			patch.object(frappe, "get_all", side_effect=capture_get_all),
+			patch.object(frappe.db, "sql", side_effect=capture_sql),
 			patch.object(frappe, "enqueue"),
 			patch.object(stock_resync, "log_step"),
 		):
 			stock_resync.enqueue_full_resync_jobs("batch-F", item_codes=["ALPHA", "BETA"])
 
-		self.assertEqual(captured["filters"]["name"], ["in", ["ALPHA", "BETA"]])
-		self.assertEqual(captured["filters"]["disabled"], 0)
-		self.assertEqual(captured["filters"]["is_stock_item"], 1)
+		self.assertIn("b.warehouse = %(warehouse)s", captured["query"])
+		self.assertEqual(captured["params"]["warehouse"], DUMMY_DEFAULT_WAREHOUSE)
+		self.assertEqual(captured["params"]["item_codes"], ("ALPHA", "BETA"))
 
 	def test_coordinator_wraps_unexpected_exception(self):
 		"""If the coordinator itself blows up, log stock_sync_resync_failed and return cleanly."""
@@ -260,3 +275,36 @@ class TestResyncCoordinator(FrappeTestCase):
 
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(stock_resync.STEP_RESYNC_FAILED, steps)
+
+
+class TestEligibilityScoping(FrappeTestCase):
+	"""The resync universe is scoped to items with a Bin in the configured warehouse."""
+
+	def test_eligibility_sql_scopes_to_warehouse_full_mode(self):
+		where, params = stock_resync._eligibility_sql(DUMMY_DEFAULT_WAREHOUSE, None)
+		self.assertIn("b.warehouse = %(warehouse)s", where)
+		self.assertIn("i.disabled = 0", where)
+		self.assertIn("i.is_stock_item = 1", where)
+		self.assertEqual(params, {"warehouse": DUMMY_DEFAULT_WAREHOUSE})
+		self.assertNotIn("item_codes", where)
+
+	def test_eligibility_sql_adds_explicit_codes(self):
+		where, params = stock_resync._eligibility_sql(DUMMY_DEFAULT_WAREHOUSE, ["A", "B"])
+		self.assertIn("b.item_code IN %(item_codes)s", where)
+		self.assertEqual(params["item_codes"], ("A", "B"))
+
+	def test_count_eligible_items_is_warehouse_scoped(self):
+		captured: dict = {}
+
+		def capture_sql(query, params=None, **kwargs):
+			captured["query"] = query
+			captured["params"] = params
+			return [[7]]
+
+		with patch.object(frappe.db, "sql", side_effect=capture_sql):
+			result = stock_resync.count_eligible_items(DUMMY_DEFAULT_WAREHOUSE)
+
+		self.assertEqual(result, 7)
+		self.assertIn("`tabBin`", captured["query"])
+		self.assertIn("b.warehouse = %(warehouse)s", captured["query"])
+		self.assertEqual(captured["params"]["warehouse"], DUMMY_DEFAULT_WAREHOUSE)
