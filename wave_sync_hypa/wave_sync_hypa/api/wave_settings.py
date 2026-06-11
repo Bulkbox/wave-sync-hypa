@@ -22,7 +22,6 @@ REQUIRED_OUTBOUND_FIELDS = (
 	"wave_api_base_url",
 	"wave_app_id",
 	"wave_store_id",
-	"default_warehouse",
 )
 
 
@@ -51,6 +50,11 @@ def _refuse_if_misconfigured(settings) -> None:
 		frappe.throw(_("Wave integration is disabled in Wave Settings; turn it on first."))
 	if not settings.outbound_stock_sync_enabled:
 		frappe.throw(_("Outbound Stock Sync is disabled in Wave Settings; turn it on first."))
+	# Checked right after the enable switches and before the API credentials:
+	# the resync only ever reads stock from this one warehouse, so a missing
+	# warehouse is the operator's first thing to fix.
+	if not (settings.get("default_warehouse") or "").strip():
+		frappe.throw(_("Set a Default Warehouse in Wave Settings; stock is only ever synced from that warehouse."))
 	for field in REQUIRED_OUTBOUND_FIELDS:
 		value = settings.get(field)
 		if isinstance(value, str):
