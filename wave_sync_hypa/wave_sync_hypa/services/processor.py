@@ -15,6 +15,7 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services.dispatcher import resolve_handler
 from wave_sync_hypa.wave_sync_hypa.services.idempotency import is_duplicate
+from wave_sync_hypa.wave_sync_hypa.services.integration_user import run_as_integration_user
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
 	STEP_MASTER_DISABLED,
@@ -112,9 +113,15 @@ def _run_handler(
 	wave_updated_at: str | None,
 	friendly_id: str | None,
 ) -> None:
-	"""Call the handler and log Completed on success or Failed on any exception."""
+	"""Call the handler and log Completed on success or Failed on any exception.
+
+	The handler runs as the configured Wave integration user (Wave Settings
+	.wave_integration_user) so inbound records are attributed to it, not Guest.
+	No-op when unset.
+	"""
 	try:
-		handler(payload, correlation_id)
+		with run_as_integration_user():
+			handler(payload, correlation_id)
 	except Exception as exc:
 		log_step(
 			correlation_id,

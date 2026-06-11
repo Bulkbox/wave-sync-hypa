@@ -8,6 +8,7 @@
  "field_order": [
   "integration_section",
   "enabled",
+  "wave_integration_user",
   "customer_email_fallback_enabled",
   "pick_list_inbound_submit_enabled",
   "shipping_item_tax_template",
@@ -73,6 +74,13 @@
    "fieldname": "enabled",
    "fieldtype": "Check",
    "label": "Integration Enabled"
+  },
+  {
+   "description": "System User the inbound Wave processing runs as, so webhook-created records are attributed to it instead of Guest. Leave blank to keep running as Guest. The user must be able to read Warehouse (e.g. Stock User/Manager) for Pick List reconciliation.",
+   "fieldname": "wave_integration_user",
+   "fieldtype": "Link",
+   "label": "Wave Integration User",
+   "options": "User"
   },
   {
    "default": "0",
