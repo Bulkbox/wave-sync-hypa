@@ -19,13 +19,19 @@ from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError, WaveRe
 CONFIG = {"base_url": "https://wave.example.com", "api_key": "key", "app_id": "app"}
 
 
-def _settings(divisor: int = 100, common_offline_id: str = "wave-cust-1", shop_id: str = "wave-shop-1") -> MagicMock:
+def _settings(
+	divisor: int = 100,
+	common_offline_id: str = "wave-cust-1",
+	shop_id: str = "wave-shop-1",
+	fee_mappings: list | None = None,
+) -> MagicMock:
 	settings = MagicMock(name="WaveSettings")
 	settings.get.side_effect = lambda key, default=None: {
 		"price_scale_divisor": divisor,
 		"wave_common_offline_customer_id": common_offline_id,
 		"wave_shop_id": shop_id,
 		"wave_default_offline_payment_type": "cash",
+		"fee_mappings": fee_mappings or [],
 	}.get(key, default)
 	return settings
 
@@ -210,3 +216,29 @@ class TestBuildOrderPayloadComments(FrappeTestCase):
 			body = wave_order_builder.build_order_payload(_so(items), "wave-cust-1", _settings(), "corr-1", CONFIG)
 		self.assertIn("SAL-ORD-001", body["comments"])
 		self.assertIn("ERP-pushed", body["comments"])
+
+
+class TestFeeItemsExcludedFromPush(FrappeTestCase):
+	"""Fee/shipping lines (Wave Settings.fee_mappings) are never pushed as Wave products."""
+
+	def test_fee_line_excluded_from_products_and_totals(self):
+		items = [
+			{"item_code": "JTD011", "qty": 2, "rate": 100.0, "amount": 200.0},
+			{"item_code": "Shipping Cost", "qty": 1, "rate": 50.0, "amount": 50.0},
+		]
+		so = _so(items)
+		settings = _settings(fee_mappings=[{"erp_item_code": "Shipping Cost"}])
+		with (
+			patch.object(frappe.db, "get_value", return_value="wave-prod-1"),
+			patch.object(
+				wave_order_builder.wave_client, "get_admin_product_by_id", return_value=_catalog()
+			) as mock_get,
+		):
+			body = wave_order_builder.build_order_payload(so, "wave-cust-1", settings, "corr-fee", CONFIG)
+		# Only the real product is pushed; the shipping line is not sent to Wave.
+		self.assertEqual([p["sku"] for p in body["products"]], ["JTD011"])
+		# Catalog GET fired only for the product, never for the fee item.
+		mock_get.assert_called_once()
+		# Totals reflect products only (fee amount excluded): 200 × 100.
+		self.assertEqual(body["orderItemsPrice"], 20000)
+		self.assertEqual(body["totalPrice"], 20000)
