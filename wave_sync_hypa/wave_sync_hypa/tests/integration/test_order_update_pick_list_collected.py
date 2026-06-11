@@ -186,6 +186,7 @@ class TestDraftPickList(FrappeTestCase):
 		):
 			ou.handle(payload, "corr-6")
 		self.assertEqual(pl.locations[0].picked_qty, 0)
+		self.assertEqual(pl.locations[0].qty, 0)  # qty zeroed too, not just picked_qty
 		pl.submit.assert_not_called()
 		pl.save.assert_called()
 		comment_bodies = [c.args[1] for c in pl.add_comment.call_args_list]
@@ -485,14 +486,35 @@ class TestReconciliationAllocator(FrappeTestCase):
 			_location("JTD011", qty=2, batch_no="BATCH-A"),
 			_location("JTD011", qty=1, batch_no="BATCH-B"),
 		]
+		doc = self._doc(rows)
 		outcome = ou._apply_wave_picking_to_locations(
-			self._doc(rows),
+			doc,
 			{"JTD011": self._wave(0, status="REMOVED")},
 			_settings(),
 		)
 		self.assertEqual([r.picked_qty for r in rows], [0.0, 0.0])
+		self.assertEqual([r.qty for r in rows], [0, 0])  # qty zeroed too
 		self.assertTrue(outcome.has_disparity)
+		self.assertIn("REMOVED", doc.wave_picking_discrepancy)  # banner field set
 		self.assertIn("REMOVED", outcome.anomalies[0])
+
+	def test_not_found_qty_zero_zeroes_qty_and_flags_disparity(self):
+		# Status COLLECTED but nothing picked (not found) -> zero qty + picked_qty.
+		rows = [_location("JTD011", qty=2, batch_no="BATCH-A")]
+		doc = self._doc(rows)
+		outcome = ou._apply_wave_picking_to_locations(
+			doc, {"JTD011": self._wave(0, status="COLLECTED")}, _settings(),
+		)
+		self.assertEqual([r.picked_qty for r in rows], [0.0])
+		self.assertEqual([r.qty for r in rows], [0])
+		self.assertTrue(outcome.has_disparity)
+		self.assertIn("NOT PICKED", doc.wave_picking_discrepancy)
+
+	def test_clean_pick_clears_discrepancy_field(self):
+		rows = [_location("JTD011", qty=2, batch_no="BATCH-A")]
+		doc = self._doc(rows)
+		ou._apply_wave_picking_to_locations(doc, {"JTD011": self._wave(2)}, _settings())
+		self.assertEqual(doc.wave_picking_discrepancy, "")
 
 	def test_missing_in_erp_flags_disparity(self):
 		# Wave reports a SKU the PL doesn't carry at all.
@@ -503,3 +525,20 @@ class TestReconciliationAllocator(FrappeTestCase):
 		)
 		self.assertTrue(outcome.has_disparity)
 		self.assertTrue(any("no matching line" in a for a in outcome.anomalies))
+
+
+class TestBuildWavePickingIndex(FrappeTestCase):
+	"""stepToUom: Wave's picked qty (steps) is multiplied to actual units to match ERP rows."""
+
+	def test_picked_quantity_multiplied_by_step(self):
+		payload = _payload()
+		payload["products"][0]["stepToUom"] = 5
+		payload["picking"]["items"][0]["quantity"] = 2  # 2 steps
+		index = ou._build_wave_picking_index(payload)
+		self.assertEqual(index["JTD011"]["quantity"], 10)  # 2 x 5 units
+
+	def test_missing_step_defaults_to_one(self):
+		payload = _payload()  # no stepToUom on the product
+		payload["picking"]["items"][0]["quantity"] = 3
+		index = ou._build_wave_picking_index(payload)
+		self.assertEqual(index["JTD011"]["quantity"], 3)
