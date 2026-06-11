@@ -25,7 +25,10 @@ frappe.ui.form.on("Sales Order", {
 		if (frm.doc.wave_payment_classification === "prepaid") {
 			_add_verify_ipay_button(frm);
 		}
-		if (!frm.is_new() && frm.doc.wave_order_id) {
+		// Manual status re-push is hidden once the SO is submitted: by then the
+		// automatic doc-event sync (DN/SI/Pick List/cancel) owns status
+		// transitions and the order is final, so the escape hatch is just risk.
+		if (!frm.is_new() && is_draft && frm.doc.wave_order_id) {
 			_add_resync_status_button(frm);
 		}
 		// "Push to Wave" / "Send Order to Wave" surfaces only for ERP-side
@@ -93,7 +96,8 @@ function _call_clear_endpoint(frm) {
 }
 
 // Attach the manual "Sync Order Status to Wave" button under the Wave group.
-// Visible only on saved Wave-sourced orders; backend re-derives the rule mapping
+// Visible only on saved DRAFT Wave-sourced orders; once submitted, the automatic
+// doc-event sync owns status transitions. Backend re-derives the rule mapping
 // for the SO's current docstatus and enqueues a PUT.
 function _add_resync_status_button(frm) {
 	frm.add_custom_button(
