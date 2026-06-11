@@ -49,6 +49,7 @@
   "default_customer_group",
   "default_territory",
   "walk_in_customer",
+  "default_customer_credit_limit",
   "rules_section",
   "route_rules",
   "inbound_status_rules",
@@ -333,6 +334,14 @@
    "fieldtype": "Link",
    "label": "Walk-in Customer",
    "options": "Customer"
+  },
+  {
+   "default": "50000",
+   "description": "Credit limit set (for the Default Company) on Customers newly created from Wave. Applied once at creation only; later changes are left to operators.",
+   "fieldname": "default_customer_credit_limit",
+   "fieldtype": "Currency",
+   "label": "Default Customer Credit Limit",
+   "non_negative": 1
   },
   {
    "description": "All rule tables are editable here. The integration reads them at dispatch time, so changes take effect immediately after save.",
