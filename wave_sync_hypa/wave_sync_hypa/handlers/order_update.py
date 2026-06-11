@@ -56,6 +56,9 @@ class SkuVerdict:
 	allocations: list[float] = field(default_factory=list)
 	message: str | None = None
 	is_disparity: bool = False
+	# True when nothing was picked (REMOVED, or step-adjusted picked qty 0): the
+	# caller zeroes the row qty as well as picked_qty, not just picked_qty.
+	zero_qty: bool = False
 
 
 @dataclass
@@ -119,8 +122,12 @@ def _build_wave_picking_index(payload: dict) -> dict[str, dict]:
 		sku = (product.get("sku") or product.get("integratorId") or "").strip()
 		if not sku:
 			continue
+		# Wave reports the picked qty in purchase *steps*; ERP rows are in actual
+		# units (qty x stepToUom, since #156). Multiply so both sides compare in
+		# the same units — otherwise a stepped pick reads as a false shortfall.
+		step = float(product.get("stepToUom") or 1)
 		index[sku] = {
-			"quantity": float(item.get("quantity") or 0),
+			"quantity": float(item.get("quantity") or 0) * step,
 			"batch_ids": list(product.get("batchIds") or []),
 			"status": (item.get("status") or "").strip().upper(),
 			"replacements": list(item.get("replacements") or []),
@@ -214,6 +221,8 @@ def _apply_wave_picking_to_locations(doc, index: dict[str, dict], settings) -> R
 		verdict = _reconcile_sku(rows, wave, settings)
 		for row, picked in zip(rows, verdict.allocations):
 			row.picked_qty = picked
+			if verdict.zero_qty:
+				row.qty = 0
 		if verdict.message:
 			outcome.anomalies.append(verdict.message)
 		if verdict.is_disparity:
@@ -226,6 +235,9 @@ def _apply_wave_picking_to_locations(doc, index: dict[str, dict], settings) -> R
 			)
 			outcome.has_disparity = True
 
+	# Persist a one-field summary so the Pick List form shows a banner; the
+	# per-anomaly Comments remain the detailed audit trail. Cleared when clean.
+	doc.wave_picking_discrepancy = "\n".join(outcome.anomalies) if outcome.has_disparity else ""
 	return outcome
 
 
@@ -245,14 +257,29 @@ def _reconcile_sku(rows: list, wave: dict, settings) -> SkuVerdict:
 		return SkuVerdict(
 			allocations=zero_allocations,
 			message=(
-				f"Wave reported SKU {sku} as REMOVED; picked_qty set to 0 across "
+				f"Wave reported SKU {sku} as REMOVED; qty and picked_qty set to 0 across "
 				f"{len(rows)} batch row(s). Operator review required."
 			),
 			is_disparity=True,
+			zero_qty=True,
 		)
 
 	wave_qty = float(wave["quantity"])
 	total_expected = sum(float(getattr(r, "qty", 0) or 0) for r in rows)
+
+	if wave_qty <= QTY_TOLERANCE:
+		# Nothing picked — item not found / not picked. Zero the qty as well as
+		# picked_qty so the line reflects that it isn't being fulfilled.
+		return SkuVerdict(
+			allocations=zero_allocations,
+			message=(
+				f"NOT PICKED: SKU {sku} — Wave reported picked qty 0 (not found / not picked); "
+				f"qty and picked_qty set to 0 across {len(rows)} row(s). Operator review required."
+			),
+			is_disparity=True,
+			zero_qty=True,
+		)
+
 	cap = min(wave_qty, total_expected)
 	allocations = _greedy_fill(rows, cap)
 
@@ -401,6 +428,9 @@ def _save_without_submit(doc, payload: dict, correlation_id: str) -> None:
 	try:
 		with _as_administrator_with_ignore_permissions():
 			doc.flags.ignore_permissions = True
+			# Removed/not-found rows are zeroed (qty=0); qty is reqd, so bypass the
+			# mandatory check on this review-only save path.
+			doc.flags.ignore_mandatory = True
 			doc.save()
 	except Exception as exc:
 		frappe.db.rollback()

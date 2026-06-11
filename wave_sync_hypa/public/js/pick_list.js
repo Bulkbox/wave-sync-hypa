@@ -16,6 +16,7 @@ const PICK_LIST_OVERRIDE_ROLE = "Pick List Wave Override";
 frappe.ui.form.on("Pick List", {
 	refresh(frm) {
 		if (frm.is_new()) return;
+		_render_discrepancy_banner(frm);
 		// Only on Draft — the picker work is over once the PL is submitted/cancelled.
 		if (frm.doc.docstatus === 0) {
 			frm.add_custom_button(
@@ -27,6 +28,21 @@ frappe.ui.form.on("Pick List", {
 		_maybe_hide_submit_when_locked_down(frm);
 	},
 });
+
+// Orange banner summarising any discrepancy Wave's picker reported against this
+// Pick List (shortfall / overpick / removed-or-not-found / identifier mismatch /
+// no matching line). The field is set by the inbound reconciler and cleared when
+// the pick is clean; the per-anomaly Comments carry the full detail.
+function _render_discrepancy_banner(frm) {
+	if (!frm.doc.wave_picking_discrepancy) return;
+	const detail = frappe.utils
+		.escape_html(frm.doc.wave_picking_discrepancy)
+		.replace(/\n/g, "<br>");
+	frm.set_intro(
+		__("Wave picking discrepancy — review before submitting:") + "<br>" + detail,
+		"orange"
+	);
+}
 
 function _maybe_hide_submit_when_locked_down(frm) {
 	frappe.db

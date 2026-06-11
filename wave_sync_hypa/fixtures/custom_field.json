@@ -595,6 +595,21 @@
  },
  {
   "doctype": "Custom Field",
+  "dt": "Pick List",
+  "fieldname": "wave_picking_discrepancy",
+  "fieldtype": "Small Text",
+  "ignore_user_permissions": 0,
+  "in_standard_filter": 0,
+  "insert_after": "wave_friendly_id",
+  "label": "Wave Picking Discrepancy",
+  "modified": "2026-05-26 00:00:00",
+  "name": "Pick List-wave_picking_discrepancy",
+  "no_copy": 1,
+  "read_only": 1,
+  "translatable": 0
+ },
+ {
+  "doctype": "Custom Field",
   "dt": "Delivery Note",
   "fieldname": "wave_order_id",
   "fieldtype": "Data",
