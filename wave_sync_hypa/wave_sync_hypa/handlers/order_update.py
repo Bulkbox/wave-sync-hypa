@@ -24,13 +24,13 @@ field is left untouched so the original-vs-updated history is preserved.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.services import picker_identifier
 from wave_sync_hypa.wave_sync_hypa.services.dispatcher import HANDLER_REGISTRY
+from wave_sync_hypa.wave_sync_hypa.services.integration_user import run_as_integration_user
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 
 STEP_NOT_COLLECTED = "pick_list_inbound_picker_not_collected"
@@ -369,28 +369,6 @@ def _maybe_propagate_customer_comment_to_sales_order(pick_list_doc, payload: dic
 		so.add_comment("Comment", f"Customer now asks: {text}")
 
 
-@contextmanager
-def _as_administrator_with_ignore_permissions():
-	"""Webhook permission bypass: impersonate Administrator + set ignore_permissions.
-
-	The inbound webhook session is Guest (allow_guest=True). ERPNext's
-	PickList.before_save calls get_descendants_of("Warehouse", ...), which routes
-	through frappe.get_list and consults the session user directly — the
-	ignore_permissions flags do not reach it. Switching the session user is the
-	only reliable way to let the Warehouse read pass without granting the
-	webhook user a real role.
-	"""
-	previous_user = frappe.session.user
-	previous_ignore = frappe.flags.get("ignore_permissions")
-	frappe.flags.ignore_permissions = True
-	try:
-		frappe.set_user("Administrator")
-		yield
-	finally:
-		frappe.set_user(previous_user)
-		frappe.flags.ignore_permissions = previous_ignore
-
-
 def _save_without_submit(doc, payload: dict, correlation_id: str) -> None:
 	"""Persist line + comment edits on a Draft Pick List under the Administrator bypass.
 
@@ -399,7 +377,7 @@ def _save_without_submit(doc, payload: dict, correlation_id: str) -> None:
 	webhook is still acknowledged — operator can retry via the manual resync.
 	"""
 	try:
-		with _as_administrator_with_ignore_permissions():
+		with run_as_integration_user(ignore_permissions=True, fallback="Administrator"):
 			doc.flags.ignore_permissions = True
 			doc.save()
 	except Exception as exc:
@@ -417,7 +395,7 @@ def _submit_pick_list_with_inbound_flag(doc, payload: dict, correlation_id: str)
 	previous_inbound = frappe.flags.get("wave_inbound_pick_list_submit")
 	frappe.flags.wave_inbound_pick_list_submit = True
 	try:
-		with _as_administrator_with_ignore_permissions():
+		with run_as_integration_user(ignore_permissions=True, fallback="Administrator"):
 			doc.flags.ignore_permissions = True
 			doc.save()
 			doc.submit()
