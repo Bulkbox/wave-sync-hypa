@@ -109,28 +109,44 @@ class TestResolveTaxId(FrappeTestCase):
 		self.assertIsNone(cr._resolve_tax_id({"fiscalId": "   "}))
 
 
-class TestResolveCustomerGroup(FrappeTestCase):
-	def test_b2b_uses_business_type_verbatim_when_group_exists(self):
-		with (
-			patch.object(frappe.db, "exists", return_value=True),
-			patch.object(frappe.db, "get_single_value", return_value="Commercial"),
-		):
-			self.assertEqual(
-				cr._resolve_customer_group(_b2b_payload()),
-				"restaurant/cafe/hotel",
-			)
+class _FakeSettings:
+	"""Stand-in for the cached Wave Settings doc exposing only business_type_mappings."""
 
-	def test_b2b_falls_back_to_default_when_group_missing_and_logs(self):
+	def __init__(self, rows: list[dict]):
+		self._rows = rows
+
+	def get(self, key, default=None):
+		return self._rows if key == "business_type_mappings" else default
+
+
+class TestResolveCustomerGroup(FrappeTestCase):
+	def test_b2b_fuzzy_match_maps_to_customer_group(self):
+		"""A row keyed 'restaurant' matches Wave's 'restaurant/cafe/hotel' (contains)."""
+		rows = [{"wave_business_type": "restaurant", "erp_customer_group": "Restaurant Sales"}]
+		with patch.object(frappe, "get_cached_doc", return_value=_FakeSettings(rows)):
+			self.assertEqual(cr._resolve_customer_group(_b2b_payload()), "Restaurant Sales")
+
+	def test_b2b_longest_matching_key_wins(self):
+		"""When several rows match, the closest (longest key) is chosen."""
+		rows = [
+			{"wave_business_type": "restaurant", "erp_customer_group": "Restaurant Sales"},
+			{"wave_business_type": "restaurant/cafe", "erp_customer_group": "Cafe Group"},
+		]
+		with patch.object(frappe, "get_cached_doc", return_value=_FakeSettings(rows)):
+			self.assertEqual(cr._resolve_customer_group(_b2b_payload()), "Cafe Group")
+
+	def test_b2b_falls_back_to_default_when_no_row_matches_and_logs(self):
+		rows = [{"wave_business_type": "grocery", "erp_customer_group": "Grocery"}]
 		with (
-			patch.object(frappe.db, "exists", return_value=False),
+			patch.object(frappe, "get_cached_doc", return_value=_FakeSettings(rows)),
 			patch.object(frappe.db, "get_single_value", return_value="Commercial"),
 			patch.object(frappe, "log_error") as mock_log,
 		):
 			self.assertEqual(cr._resolve_customer_group(_b2b_payload()), "Commercial")
-		# The missing-group fallback writes to the Frappe Error Log for triage.
+		# The no-match fallback writes to the Frappe Error Log for triage.
 		self.assertEqual(mock_log.call_count, 1)
 		(_, kwargs) = mock_log.call_args
-		# Title + message both mention the businessType so the row is findable.
+		# Message mentions the businessType so the row is findable.
 		self.assertIn("restaurant/cafe/hotel", kwargs.get("message", ""))
 
 	def test_b2c_uses_default_customer_group(self):

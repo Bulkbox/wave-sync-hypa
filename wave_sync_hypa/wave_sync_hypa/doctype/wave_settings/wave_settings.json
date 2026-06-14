@@ -58,6 +58,7 @@
   "fee_mappings",
   "tax_rules",
   "payment_method_mappings",
+  "business_type_mappings",
   "ipay_section",
   "ipay_verification_enabled",
   "wave_payment_review_assignee"
@@ -398,6 +399,13 @@
    "fieldtype": "Table",
    "label": "Payment Method Mappings",
    "options": "Wave Payment Method Mapping"
+  },
+  {
+   "description": "Maps a Wave businessType (e.g. restaurant/cafe/hotel) to an ERP Customer Group for B2B customers. Matched fuzzily: a row matches when its key is contained in the incoming businessType (or vice-versa); the longest matching key wins. No match falls back to Default Customer Group.",
+   "fieldname": "business_type_mappings",
+   "fieldtype": "Table",
+   "label": "Business Type Mappings",
+   "options": "Wave Business Type Mapping"
   },
   {
    "fieldname": "ipay_section",
