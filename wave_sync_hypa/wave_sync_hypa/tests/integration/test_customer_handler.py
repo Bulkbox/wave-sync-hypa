@@ -67,6 +67,12 @@ class TestCustomerHandler(FrappeTestCase):
 			"Address", filters={"wave_address_id": self.wave_address_id}, pluck="name"
 		):
 			frappe.delete_doc("Address", addr, ignore_permissions=True, delete_permanently=True)
+		# A Customer's primary_contact links back to its Contact; clear it first so
+		# the link check doesn't block the Contact delete.
+		for cust in frappe.get_all(
+			"Customer", filters={"wave_customer_id": self.wave_customer_id}, pluck="name"
+		):
+			frappe.db.set_value("Customer", cust, "customer_primary_contact", None)
 		for contact in frappe.get_all(
 			"Contact", filters={"wave_contact_id": self.wave_customer_id}, pluck="name"
 		):
