@@ -35,6 +35,8 @@ synthetic `_id = f"business:{wave_customer_id}"`). The resulting
 Address is labelled "Business Address" and typed `Office`.
 """
 
+import re
+
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_new
@@ -355,12 +357,30 @@ def _resolve_customer_name(payload: dict) -> str:
 	return _full_name(payload)
 
 
+# KRA PIN format the Slade compliance app enforces on Customer.tax_id: one
+# letter, nine digits, one letter (e.g. P051234567X). It throws on anything else,
+# which ignore_mandatory does NOT bypass — so a malformed Wave fiscalId would
+# block the whole Customer insert. We drop such values (logged) instead.
+_KRA_PIN = re.compile(r"^[A-Z]\d{9}[A-Z]$")
+
+
 def _resolve_tax_id(payload: dict) -> str | None:
-	"""Read fiscalId (current) or taxId (future) and return whichever Wave sent."""
+	"""Return Wave's fiscalId (current) or taxId (future) as the ERP tax_id, but
+	only when it is a valid KRA PIN; a malformed value is logged and dropped so it
+	can never block customer creation."""
 	for key in ("fiscalId", "taxId"):
 		value = (payload.get(key) or "").strip()
-		if value:
+		if not value:
+			continue
+		if _KRA_PIN.match(value):
 			return value
+		frappe.log_error(
+			title="wave_sync_hypa: dropping non-KRA tax id",
+			message=(
+				f"Wave sent {key}={value!r}, which is not a valid KRA PIN; leaving "
+				"Customer.tax_id blank so the customer still imports."
+			),
+		)
 	return None
 
 

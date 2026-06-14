@@ -32,7 +32,7 @@ def _b2b_payload(**overrides) -> dict:
 		"businessAddress": "Unga House, Muthithi Road",
 		"city": "Nairobi",
 		"businessType": "restaurant/cafe/hotel",
-		"fiscalId": "100100",
+		"fiscalId": "P051234567X",
 		"isGuest": False,
 	}
 	base.update(overrides)
@@ -87,8 +87,8 @@ class TestResolveCustomerName(FrappeTestCase):
 
 
 class TestResolveTaxId(FrappeTestCase):
-	def test_fiscal_id_today(self):
-		self.assertEqual(cr._resolve_tax_id(_b2b_payload()), "100100")
+	def test_valid_kra_pin_passes_through(self):
+		self.assertEqual(cr._resolve_tax_id(_b2b_payload()), "P051234567X")
 
 	def test_tax_id_in_future(self):
 		"""When Wave migrates fiscalId -> taxId, the resolver picks it up automatically."""
@@ -99,8 +99,22 @@ class TestResolveTaxId(FrappeTestCase):
 
 	def test_fiscal_id_wins_when_both_present(self):
 		"""Transition period: prefer fiscalId so old Wave deployments don't break."""
-		payload = _b2b_payload(taxId="ignored")
-		self.assertEqual(cr._resolve_tax_id(payload), "100100")
+		payload = _b2b_payload(taxId="A051234567B")
+		self.assertEqual(cr._resolve_tax_id(payload), "P051234567X")
+
+	def test_malformed_fiscal_id_dropped_and_logged(self):
+		"""A non-KRA fiscalId is dropped (not stored) so it can't block customer creation."""
+		with patch.object(frappe, "log_error") as mock_log:
+			self.assertIsNone(cr._resolve_tax_id({"fiscalId": "100100"}))
+		self.assertEqual(mock_log.call_count, 1)
+
+	def test_invalid_fiscal_id_falls_through_to_valid_tax_id(self):
+		"""A malformed fiscalId is skipped; a valid taxId is still used."""
+		with patch.object(frappe, "log_error"):
+			self.assertEqual(
+				cr._resolve_tax_id({"fiscalId": "100100", "taxId": "P051234567B"}),
+				"P051234567B",
+			)
 
 	def test_neither_present_returns_none(self):
 		self.assertIsNone(cr._resolve_tax_id(_b2c_payload()))
