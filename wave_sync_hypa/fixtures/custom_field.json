@@ -542,6 +542,16 @@
   "translatable": 0
  },
  {
+  "doctype": "Custom Field",
+  "dt": "Sales Order",
+  "fieldname": "wave_payment_section_end",
+  "fieldtype": "Section Break",
+  "insert_after": "wave_payment_review_reason",
+  "modified": "2026-06-14 00:00:00",
+  "name": "Sales Order-wave_payment_section_end",
+  "translatable": 0
+ },
+ {
   "collapsible": 0,
   "doctype": "Custom Field",
   "dt": "Sales Order",
