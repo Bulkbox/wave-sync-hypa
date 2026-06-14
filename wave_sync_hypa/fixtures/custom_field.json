@@ -542,12 +542,12 @@
   "translatable": 0
  },
  {
-  "collapsible": 1,
+  "collapsible": 0,
   "doctype": "Custom Field",
   "dt": "Sales Order",
   "fieldname": "wave_customer_notes_section",
   "fieldtype": "Section Break",
-  "insert_after": "wave_payment_review_reason",
+  "insert_after": "wave_delivery_time",
   "label": "Wave Customer Notes",
   "modified": "2026-05-29 00:00:00",
   "name": "Sales Order-wave_customer_notes_section",
