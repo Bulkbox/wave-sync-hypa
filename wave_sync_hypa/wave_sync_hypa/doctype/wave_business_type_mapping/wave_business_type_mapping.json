@@ -1,0 +1,56 @@
+{
+ "actions": [],
+ "autoname": "autoincrement",
+ "creation": "2026-06-14 00:00:00",
+ "description": "Maps a Wave businessType (e.g. restaurant/cafe/hotel) to an ERP Customer Group. Matched fuzzily: a configured key matches when it is contained in the incoming businessType; the longest matching key wins.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "wave_business_type",
+  "erp_customer_group",
+  "description"
+ ],
+ "fields": [
+  {
+   "columns": 3,
+   "description": "Wave businessType, or a fragment of it (e.g. 'restaurant' to match 'restaurant/cafe/hotel').",
+   "fieldname": "wave_business_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Wave Business Type",
+   "reqd": 1
+  },
+  {
+   "columns": 4,
+   "description": "Customer Group assigned to a B2B customer whose businessType matches this row.",
+   "fieldname": "erp_customer_group",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "ERP Customer Group",
+   "options": "Customer Group",
+   "reqd": 1
+  },
+  {
+   "columns": 4,
+   "description": "Optional human-readable note, shown in the mapping grid.",
+   "fieldname": "description",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Description"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-06-14 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Wave Sync Hypa",
+ "name": "Wave Business Type Mapping",
+ "naming_rule": "Autoincrement",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

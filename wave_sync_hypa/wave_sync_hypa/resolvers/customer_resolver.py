@@ -365,31 +365,53 @@ def _resolve_tax_id(payload: dict) -> str | None:
 
 
 def _resolve_customer_group(payload: dict) -> str | None:
-	"""For B2B payloads look up Customer Group named after businessType; else use default.
+	"""For B2B payloads map businessType to a Customer Group via the configurable
+	Wave Settings.business_type_mappings table; else use the default.
 
-	When `businessType` is set but no Customer Group with that name exists, we
-	fall back to Wave Settings.default_customer_group AND write a Frappe Error
-	Log row so accounting knows to add the missing group. Returns None only
-	when both lookup and default fail (let _create / _first_customer_group fill
+	When `businessType` is set but no mapping row matches, fall back to
+	Wave Settings.default_customer_group AND write a Frappe Error Log row so
+	accounting knows to add the missing mapping. Returns None only when both
+	the mapping and the default fail (let _create / _first_customer_group fill
 	in the absolute fallback).
 	"""
 	customer_type = (payload.get("customerType") or "").strip().lower()
 	business_type = (payload.get("businessType") or "").strip()
 	if customer_type == "b2b" and business_type:
-		if frappe.db.exists("Customer Group", business_type):
-			return business_type
-		# Group is missing on this site. Log to the Frappe Error Log so it
+		group = _match_business_type(business_type)
+		if group:
+			return group
+		# No mapping matched on this site. Log to the Frappe Error Log so it
 		# surfaces in the desk's standard triage view; fall back to the default.
 		frappe.log_error(
-			title="wave_sync_hypa: missing Customer Group for businessType",
+			title="wave_sync_hypa: no Customer Group mapping for businessType",
 			message=(
-				f"Wave customer payload has businessType='{business_type}' but no Customer "
-				f"Group with that name exists. Falling back to "
-				f"Wave Settings.default_customer_group. Add a Customer Group named "
-				f"'{business_type}' to classify this and future customers correctly."
+				f"Wave customer payload has businessType='{business_type}' but no "
+				f"Wave Settings Business Type Mapping row matches it. Falling back to "
+				f"Wave Settings.default_customer_group. Add a mapping row to classify "
+				f"this and future customers correctly."
 			),
 		)
 	return _default("default_customer_group")
+
+
+def _match_business_type(business_type: str) -> str | None:
+	"""Return the mapped Customer Group for a Wave businessType, or None.
+
+	A mapping row matches when its key and the incoming businessType contain one
+	another (case-insensitive), so a row keyed 'restaurant' matches Wave's
+	'restaurant/cafe/hotel'. The longest matching key wins (closest match).
+	"""
+	incoming = business_type.lower()
+	rows = frappe.get_cached_doc("Wave Settings").get("business_type_mappings") or []
+	matches = []
+	for row in rows:
+		key = (row.get("wave_business_type") or "").strip().lower()
+		if key and (key in incoming or incoming in key):
+			matches.append(row)
+	if not matches:
+		return None
+	best = max(matches, key=lambda r: len(r.get("wave_business_type") or ""))
+	return best.get("erp_customer_group")
 
 
 def _full_name(payload: dict) -> str:

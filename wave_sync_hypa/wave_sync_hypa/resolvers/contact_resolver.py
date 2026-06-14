@@ -26,19 +26,21 @@ def _find_contact(wave_customer_id: str) -> str | None:
 
 
 def _create_contact(customer_name: str, payload: dict) -> str:
-	"""Insert a new Contact, link it to the Customer, and fill identity + primary email/phone."""
+	"""Insert a new primary Contact, link it to the Customer, and fill identity + email/phone."""
 	doc = frappe.get_doc(
 		{
 			"doctype": "Contact",
 			"first_name": payload.get("firstName") or payload.get("email") or "Wave Contact",
 			"last_name": payload.get("lastName"),
 			"wave_contact_id": payload.get("_id"),
+			"is_primary_contact": 1,
 			"links": [{"link_doctype": "Customer", "link_name": customer_name}],
 			"email_ids": _email_ids(payload),
 			"phone_nos": _phone_nos(payload),
 		}
 	)
 	doc.insert(ignore_permissions=True)
+	_promote_primary_contact(customer_name, doc)
 	return doc.name
 
 
@@ -50,6 +52,50 @@ def _apply_updates(contact_name: str, payload: dict) -> None:
 	_replace_emails(doc, _email_ids(payload))
 	_replace_phones(doc, _phone_nos(payload))
 	doc.save(ignore_permissions=True)
+	customer_name = _linked_customer(doc)
+	if customer_name:
+		_sync_primary_card(customer_name, doc)
+
+
+def _promote_primary_contact(customer_name: str, contact) -> None:
+	"""Make this Contact the Customer's primary when the Customer has none yet.
+
+	ERPNext writes customer_primary_contact / mobile_no / email_id only from
+	Customer.create_primary_contact, whose guard never fires for Wave-created
+	customers — so set them here. db.set_value because mobile_no/email_id are
+	read-only derived fields (a Customer.save would re-trip the KRA-PIN mandatory
+	check). An operator's existing primary is never overwritten.
+	"""
+	if frappe.db.get_value("Customer", customer_name, "customer_primary_contact"):
+		return
+	frappe.db.set_value(
+		"Customer",
+		customer_name,
+		{
+			"customer_primary_contact": contact.name,
+			"mobile_no": contact.mobile_no,
+			"email_id": contact.email_id,
+		},
+	)
+
+
+def _sync_primary_card(customer_name: str, contact) -> None:
+	"""Refresh the Customer card's mobile/email, but only when this Contact is already its primary."""
+	if frappe.db.get_value("Customer", customer_name, "customer_primary_contact") != contact.name:
+		return
+	frappe.db.set_value(
+		"Customer",
+		customer_name,
+		{"mobile_no": contact.mobile_no, "email_id": contact.email_id},
+	)
+
+
+def _linked_customer(contact) -> str | None:
+	"""Return the Customer this Contact links to via its Dynamic Link rows, or None."""
+	for link in contact.links or []:
+		if link.link_doctype == "Customer":
+			return link.link_name
+	return None
 
 
 def _email_ids(payload: dict) -> list[dict]:

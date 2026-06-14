@@ -48,6 +48,10 @@ class TestOrderCreate(FrappeTestCase):
 			)
 		self._safe_delete_many("Sales Order", {"wave_order_id": self.wave_order_id})
 		self._safe_delete_many("Address", {"wave_address_id": self.wave_address_id})
+		# A Customer's primary_contact links back to its Contact; clear it first so
+		# the link check doesn't block the Contact delete.
+		for cust in frappe.get_all("Customer", filters={"wave_customer_id": self.wave_user_id}, pluck="name"):
+			frappe.db.set_value("Customer", cust, "customer_primary_contact", None)
 		self._safe_delete_many("Contact", {"wave_contact_id": self.wave_user_id})
 		self._safe_delete_many("Customer", {"wave_customer_id": self.wave_user_id})
 		self._safe_delete_many("Wave Sync Log", {"correlation_id": self.correlation_id})

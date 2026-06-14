@@ -54,6 +54,9 @@ def _pick_list(name: str = "PICK-2026-99999", docstatus: int = 0, locations=None
 	doc.docstatus = docstatus
 	doc.locations = locations or []
 	doc.flags = SimpleNamespace()
+	# Make doc.set("locations", rows) actually rebind the attribute so the
+	# row-removal path is observable; everything else stays a MagicMock.
+	doc.set = lambda field, value: setattr(doc, field, value)
 	return doc
 
 
@@ -172,8 +175,8 @@ class TestDraftPickList(FrappeTestCase):
 		self.assertIn(ou.STEP_REPLACEMENT_PRESENT, steps)
 		self.assertNotIn(ou.STEP_DRAFT_SUBMITTED, steps)
 
-	def test_removed_item_zeroes_qty_and_blocks_submit(self):
-		"""REMOVED is now a disparity — operator decides whether to amend / resubmit."""
+	def test_removed_item_drops_line_and_blocks_submit(self):
+		"""REMOVED is a disparity; the line is dropped (here the only line -> kept zeroed)."""
 		pl = _pick_list(locations=[_location("JTD011", sales_order="SO-X", qty=2, batch_no="JTD01100016")])
 		payload = _payload()
 		payload["picking"]["items"][0]["status"] = "REMOVED"
@@ -186,7 +189,8 @@ class TestDraftPickList(FrappeTestCase):
 		):
 			ou.handle(payload, "corr-6")
 		self.assertEqual(pl.locations[0].picked_qty, 0)
-		self.assertEqual(pl.locations[0].qty, 0)  # qty zeroed too, not just picked_qty
+		self.assertEqual(pl.locations[0].qty, 0)  # only line -> kept at 0, not deleted
+		self.assertEqual(pl.pick_manually, 1)  # table locked from FEFO re-derivation
 		pl.submit.assert_not_called()
 		pl.save.assert_called()
 		comment_bodies = [c.args[1] for c in pl.add_comment.call_args_list]
@@ -381,8 +385,10 @@ class TestReconciliationAllocator(FrappeTestCase):
 	"""Per-SKU multi-row reconciliation: greedy fill, verdicts, no batch_no rewrite."""
 
 	def _doc(self, locations: list) -> SimpleNamespace:
-		"""Doc stand-in carrying only the locations[] the allocator walks."""
-		return SimpleNamespace(locations=locations)
+		"""Doc stand-in carrying the locations[] the allocator walks + a working set()."""
+		doc = SimpleNamespace(locations=locations)
+		doc.set = lambda field, value: setattr(doc, field, value)
+		return doc
 
 	def _wave(self, quantity: float, batch_ids=None, status: str = "COLLECTED") -> dict:
 		"""Minimal Wave picking-index entry for one SKU."""
@@ -481,7 +487,8 @@ class TestReconciliationAllocator(FrappeTestCase):
 		)
 		self.assertFalse(outcome.has_disparity)
 
-	def test_removed_zeroes_qty_and_flags_disparity(self):
+	def test_all_removed_keeps_rows_zeroed_and_flags_disparity(self):
+		# Every line REMOVED -> can't leave an empty PL, so rows stay at qty 0.
 		rows = [
 			_location("JTD011", qty=2, batch_no="BATCH-A"),
 			_location("JTD011", qty=1, batch_no="BATCH-B"),
@@ -492,21 +499,39 @@ class TestReconciliationAllocator(FrappeTestCase):
 			{"JTD011": self._wave(0, status="REMOVED")},
 			_settings(),
 		)
-		self.assertEqual([r.picked_qty for r in rows], [0.0, 0.0])
-		self.assertEqual([r.qty for r in rows], [0, 0])  # qty zeroed too
+		self.assertEqual([r.picked_qty for r in doc.locations], [0.0, 0.0])
+		self.assertEqual([r.qty for r in doc.locations], [0, 0])  # kept, zeroed
+		self.assertEqual(doc.pick_manually, 1)  # table locked from FEFO re-derivation
 		self.assertTrue(outcome.has_disparity)
 		self.assertIn("REMOVED", doc.wave_picking_discrepancy)  # banner field set
-		self.assertIn("REMOVED", outcome.anomalies[0])
+		self.assertIn("dropped", outcome.anomalies[0])
 
-	def test_not_found_qty_zero_zeroes_qty_and_flags_disparity(self):
-		# Status COLLECTED but nothing picked (not found) -> zero qty + picked_qty.
+	def test_partial_removal_drops_only_removed_sku(self):
+		# JTD011 picked clean, BFK162 removed -> only the BFK162 row is dropped.
+		jtd = _location("JTD011", qty=2, batch_no="BATCH-A")
+		bfk = _location("BFK162", qty=1, batch_no="BATCH-B")
+		doc = self._doc([jtd, bfk])
+		outcome = ou._apply_wave_picking_to_locations(
+			doc,
+			{"JTD011": self._wave(2), "BFK162": self._wave(0, status="REMOVED")},
+			_settings(),
+		)
+		self.assertEqual([r.item_code for r in doc.locations], ["JTD011"])  # BFK row gone
+		self.assertEqual(jtd.picked_qty, 2)  # kept row still allocated
+		self.assertEqual(doc.pick_manually, 1)
+		self.assertTrue(outcome.has_disparity)
+		self.assertIn("REMOVED", doc.wave_picking_discrepancy)
+
+	def test_not_found_qty_zero_drops_line_and_flags_disparity(self):
+		# Status COLLECTED but nothing picked (not found); single line -> kept zeroed.
 		rows = [_location("JTD011", qty=2, batch_no="BATCH-A")]
 		doc = self._doc(rows)
 		outcome = ou._apply_wave_picking_to_locations(
 			doc, {"JTD011": self._wave(0, status="COLLECTED")}, _settings(),
 		)
-		self.assertEqual([r.picked_qty for r in rows], [0.0])
-		self.assertEqual([r.qty for r in rows], [0])
+		self.assertEqual([r.picked_qty for r in doc.locations], [0.0])
+		self.assertEqual([r.qty for r in doc.locations], [0])
+		self.assertEqual(doc.pick_manually, 1)
 		self.assertTrue(outcome.has_disparity)
 		self.assertIn("NOT PICKED", doc.wave_picking_discrepancy)
 

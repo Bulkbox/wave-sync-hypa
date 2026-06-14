@@ -16,6 +16,7 @@ test class via the unit package namespace. Adding a new unit test file
 requires one line here.
 """
 
+from .test_contact_resolver import *  # noqa: F401, F403
 from .test_correlation import *  # noqa: F401, F403
 from .test_credit_note_classifier import *  # noqa: F401, F403
 from .test_customer_business_classification import *  # noqa: F401, F403
