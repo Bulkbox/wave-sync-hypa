@@ -56,9 +56,10 @@ class SkuVerdict:
 	allocations: list[float] = field(default_factory=list)
 	message: str | None = None
 	is_disparity: bool = False
-	# True when nothing was picked (REMOVED, or step-adjusted picked qty 0): the
-	# caller zeroes the row qty as well as picked_qty, not just picked_qty.
-	zero_qty: bool = False
+	# True when nothing was picked (REMOVED or not-found): the caller drops these
+	# rows from the Pick List so the team can never submit a 0-qty line. If every
+	# line is removed the rows are kept at qty 0 instead (an empty PL is pointless).
+	removed: bool = False
 
 
 @dataclass
@@ -214,15 +215,17 @@ def _apply_wave_picking_to_locations(doc, index: dict[str, dict], settings) -> R
 		rows_by_sku.setdefault(sku, []).append(row)
 
 	outcome = ReconciliationOutcome()
+	rows_to_remove: list = []
 	for sku, rows in rows_by_sku.items():
 		wave = index.get(sku)
 		if not wave:
 			continue
 		verdict = _reconcile_sku(rows, wave, settings)
-		for row, picked in zip(rows, verdict.allocations):
-			row.picked_qty = picked
-			if verdict.zero_qty:
-				row.qty = 0
+		if verdict.removed:
+			rows_to_remove.extend(rows)
+		else:
+			for row, picked in zip(rows, verdict.allocations):
+				row.picked_qty = picked
 		if verdict.message:
 			outcome.anomalies.append(verdict.message)
 		if verdict.is_disparity:
@@ -235,10 +238,32 @@ def _apply_wave_picking_to_locations(doc, index: dict[str, dict], settings) -> R
 			)
 			outcome.has_disparity = True
 
+	if rows_to_remove:
+		_drop_removed_rows(doc, rows_to_remove)
+
 	# Persist a one-field summary so the Pick List form shows a banner; the
 	# per-anomaly Comments remain the detailed audit trail. Cleared when clean.
 	doc.wave_picking_discrepancy = "\n".join(outcome.anomalies) if outcome.has_disparity else ""
 	return outcome
+
+
+def _drop_removed_rows(doc, rows_to_remove: list) -> None:
+	"""Drop Wave-removed / not-found rows so the team can't submit a 0-qty line.
+
+	pick_manually=1 stops ERPNext re-deriving the table from the Sales Order on
+	save (before_save -> set_item_locations), which would otherwise strip the
+	picked rows and re-add the removed ones. If every line was removed we keep
+	them at qty 0 for the operator to cancel, since an empty Pick List is pointless.
+	"""
+	doc.pick_manually = 1
+	remove_ids = {id(row) for row in rows_to_remove}
+	remaining = [row for row in (doc.locations or []) if id(row) not in remove_ids]
+	if remaining:
+		doc.set("locations", remaining)
+	else:
+		for row in rows_to_remove:
+			row.qty = 0
+			row.picked_qty = 0
 
 
 def _reconcile_sku(rows: list, wave: dict, settings) -> SkuVerdict:
@@ -257,27 +282,27 @@ def _reconcile_sku(rows: list, wave: dict, settings) -> SkuVerdict:
 		return SkuVerdict(
 			allocations=zero_allocations,
 			message=(
-				f"Wave reported SKU {sku} as REMOVED; qty and picked_qty set to 0 across "
-				f"{len(rows)} batch row(s). Operator review required."
+				f"Wave reported SKU {sku} as REMOVED; its {len(rows)} line(s) were "
+				f"dropped from this Pick List. Operator review required."
 			),
 			is_disparity=True,
-			zero_qty=True,
+			removed=True,
 		)
 
 	wave_qty = float(wave["quantity"])
 	total_expected = sum(float(getattr(r, "qty", 0) or 0) for r in rows)
 
 	if wave_qty <= QTY_TOLERANCE:
-		# Nothing picked — item not found / not picked. Zero the qty as well as
-		# picked_qty so the line reflects that it isn't being fulfilled.
+		# Nothing picked — item not found / not picked. Drop the line so the
+		# Pick List reflects only what is actually being fulfilled.
 		return SkuVerdict(
 			allocations=zero_allocations,
 			message=(
 				f"NOT PICKED: SKU {sku} — Wave reported picked qty 0 (not found / not picked); "
-				f"qty and picked_qty set to 0 across {len(rows)} row(s). Operator review required."
+				f"its {len(rows)} line(s) were dropped from this Pick List. Operator review required."
 			),
 			is_disparity=True,
-			zero_qty=True,
+			removed=True,
 		)
 
 	cap = min(wave_qty, total_expected)
@@ -406,8 +431,8 @@ def _save_without_submit(doc, payload: dict, correlation_id: str) -> None:
 	try:
 		with run_as_integration_user(ignore_permissions=True, fallback="Administrator"):
 			doc.flags.ignore_permissions = True
-			# Removed/not-found rows are zeroed (qty=0); qty is reqd, so bypass the
-			# mandatory check on this review-only save path.
+			# An all-removed Pick List keeps its rows at qty=0 (qty is reqd), so
+			# bypass the mandatory check on this review-only save path.
 			doc.flags.ignore_mandatory = True
 			doc.save()
 	except Exception as exc:
