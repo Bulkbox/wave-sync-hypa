@@ -17,6 +17,7 @@ requires one line here.
 """
 
 from .test_contact_resolver import *  # noqa: F401, F403
+from .test_coupon_intake import *  # noqa: F401, F403
 from .test_coupon_resolver import *  # noqa: F401, F403
 from .test_correlation import *  # noqa: F401, F403
 from .test_credit_note_classifier import *  # noqa: F401, F403
