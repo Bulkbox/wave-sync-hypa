@@ -66,8 +66,10 @@ def handle(payload: dict, correlation_id: str) -> None:
 
 	_apply_payment_metadata(sales_order, settings, payload, correlation_id)
 	_apply_wave_comments(sales_order, payload)
-	skipped_coupons = _apply_coupon(sales_order, payload, settings, correlation_id)
 	_persist_sales_order(sales_order)
+	# Coupon is applied as a second save on the persisted draft so a discount that
+	# ERPNext rejects (e.g. larger than the computed total) can never fail the order.
+	skipped_coupons = _apply_coupon(sales_order, payload, settings, correlation_id)
 
 	if skipped_items:
 		_annotate_sales_order_for_skipped_items(
@@ -457,12 +459,13 @@ def _build_fee_line(item_code: str, fee_type: str, amount_major: float, sales_or
 
 
 def _apply_coupon(sales_order, payload: dict, settings, correlation_id: str) -> list[dict]:
-	"""Mirror a valid Wave COUPON onto the SO via its native coupon_code; return skipped details.
+	"""Mirror a valid Wave COUPON onto the persisted SO via its native coupon_code.
 
 	Gated by Wave Settings.coupon_sync_enabled. Only a valid (isValid) coupon with a
-	positive amount is applied, one per order. A coupon whose amount exceeds the order
-	subtotal, or that cannot be resolved/created in ERP, is collected (non-fatal) so the
-	caller flags the SO for review rather than failing the order.
+	positive amount is applied, one per order. The Sales Order is already inserted, so
+	we set coupon_code + re-save inside a savepoint: a coupon larger than the computed
+	grand_total, or one that cannot be resolved/applied, is rolled back and collected
+	(non-fatal) — the order itself is never lost. Returns skipped details for the caller.
 	"""
 	if not settings.get("coupon_sync_enabled"):
 		return []
@@ -472,17 +475,18 @@ def _apply_coupon(sales_order, payload: dict, settings, correlation_id: str) -> 
 	divisor = int(settings.price_scale_divisor or 100)
 	code = (coupon.get("value") or "").strip()
 	amount_major = cents_to_major(coupon.get("amount"), divisor)
-	# Safety guard against ERPNext throwing when a discount exceeds the total: a
-	# coupon worth more than the order subtotal Wave sent is treated as invalid.
-	subtotal_major = cents_to_major(payload.get("orderItemsPrice"), divisor)
-	if subtotal_major and amount_major > subtotal_major:
+	grand_total = float(sales_order.grand_total or 0)
+	if grand_total and amount_major > grand_total:
 		return [{"code": code, "amount_major": amount_major,
-			"error": f"coupon amount {amount_major} exceeds order subtotal {subtotal_major}"}]
+			"error": f"coupon amount {amount_major} exceeds order total {grand_total}"}]
+	frappe.db.savepoint("wave_coupon")
 	try:
 		sales_order.coupon_code = resolve_coupon(code, amount_major, settings, correlation_id)
-	except WaveResolutionError as exc:
+		sales_order.save(ignore_permissions=True)
+		return []
+	except Exception as exc:
+		frappe.db.rollback(save_point="wave_coupon")
 		return [{"code": code, "amount_major": amount_major, "error": str(exc)}]
-	return []
 
 
 def _extract_valid_coupon(payload: dict) -> dict | None:
