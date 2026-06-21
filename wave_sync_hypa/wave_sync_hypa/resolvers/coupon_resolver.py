@@ -22,6 +22,11 @@ from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveResolutionError
 # real validity rules, so the cap is set high enough never to block a reused coupon.
 COUPON_MAX_USE = 1_000_000_000
 
+# Wave owns coupon validity; the ERP Pricing Rule must not impose its own date
+# window. ERPNext defaults valid_from to "today", which would silently drop the
+# discount on a back-dated or post-midnight order — so open the start date.
+COUPON_RULE_VALID_FROM = "2000-01-01"
+
 STEP_CREATED = "coupon_created"
 STEP_REALIGNED = "coupon_amount_realigned"
 
@@ -93,6 +98,7 @@ def _create(code: str, amount_major: float, settings, correlation_id: str) -> st
 				"rate_or_discount": "Discount Amount",
 				"discount_amount": amount_major,
 				"apply_discount_on": apply_discount_on,
+				"valid_from": COUPON_RULE_VALID_FROM,
 				"currency": currency,
 				"selling": 1,
 				"coupon_code_based": 1,

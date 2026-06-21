@@ -49,6 +49,7 @@ class TestCreate(FrappeTestCase):
 		self.assertEqual(rule_spec["rate_or_discount"], "Discount Amount")
 		self.assertEqual(rule_spec["discount_amount"], 10.0)
 		self.assertEqual(rule_spec["apply_discount_on"], "Grand Total")
+		self.assertEqual(rule_spec["valid_from"], cr.COUPON_RULE_VALID_FROM)  # Wave owns validity, no ERP date gate
 		self.assertEqual(rule_spec["currency"], "KES")
 		self.assertEqual(rule_spec["selling"], 1)
 		self.assertEqual(rule_spec["coupon_code_based"], 1)
