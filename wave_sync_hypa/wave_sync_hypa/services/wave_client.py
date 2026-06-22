@@ -142,6 +142,43 @@ def post_order_status(
 	return _parse_json(response)
 
 
+def post_order_invoicing(
+	*,
+	base_url: str,
+	api_key: str,
+	app_id: str,
+	order_id: str,
+	body: dict,
+	timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+	"""POST invoicing details for one order to Wave; prerequisite for COMPLETED.
+
+	    POST /api/v3/admin/orders/{order_id}/invoicing
+	    Body: {receiptNumber, receiptPrice, vendorInvoiceNumber, ...}
+
+	Wave's status endpoint refuses COMPLETED with ORDER0050 until an order carries
+	invoicing details; this saves them. Returns the parsed JSON body on success.
+	"""
+	if not base_url:
+		raise WaveOutboundError("Wave API base URL is not configured.")
+	if not api_key:
+		raise WaveOutboundError("Wave API key is not configured.")
+	if not app_id:
+		raise WaveOutboundError("Wave App ID is not configured.")
+	if not order_id:
+		raise WaveOutboundError("order_id is required.")
+
+	url = f"{base_url.rstrip('/')}/api/v3/admin/orders/{order_id}/invoicing"
+	headers = _build_status_headers(api_key, app_id)
+	try:
+		response = requests.post(url, headers=headers, json=body, timeout=timeout)
+	except requests.RequestException as exc:
+		raise WaveOutboundError(f"network error calling Wave order invoicing: {exc}") from exc
+
+	_raise_for_response(response, "order invoicing")
+	return _parse_json(response)
+
+
 def reject_admin_order(
 	*,
 	base_url: str,

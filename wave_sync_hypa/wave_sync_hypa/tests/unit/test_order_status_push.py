@@ -712,3 +712,74 @@ class TestCancelViaReject(FrappeTestCase):
 		]
 		self.assertEqual(len(entries), 1)
 		self.assertEqual(entries[0].kwargs.get("action"), "cancel")
+
+
+class TestCompletedInvoicing(FrappeTestCase):
+	"""COMPLETED first saves invoicing details to Wave, then pushes the status."""
+
+	def test_completed_posts_invoicing_then_status(self):
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(frappe.db, "sql", return_value=[{"name": "IV-1", "grand_total": 100.0}]),
+			patch.object(order_status_pusher.wave_client, "post_order_invoicing", return_value={"ok": True}) as mock_inv,
+			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={"ok": True}) as mock_status,
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			_push(payload={"status": "COMPLETED"})
+		mock_inv.assert_called_once_with(
+			base_url=DUMMY_BASE_URL, api_key=DUMMY_API_KEY, app_id=DUMMY_APP_ID,
+			order_id=DUMMY_WAVE_ORDER_ID,
+			body={"receiptNumber": "IV-1", "receiptPrice": 10000, "vendorInvoiceNumber": "IV-1"},
+		)
+		mock_status.assert_called_once()  # status push proceeds after invoicing
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_INVOICING_SUCCESS, steps)
+		self.assertIn(order_status_pusher.STEP_PUSH_SUCCESS, steps)
+
+	def test_completed_with_no_invoice_holds_status_and_flags_review(self):
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(frappe.db, "sql", return_value=[]),  # no submitted Sales Invoice
+			patch.object(frappe.db, "get_value", return_value="SO-1"),
+			patch.object(frappe.db, "set_value") as mock_set,
+			patch.object(order_status_pusher.wave_client, "post_order_invoicing") as mock_inv,
+			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_status,
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			_push(payload={"status": "COMPLETED"})
+		mock_inv.assert_not_called()
+		mock_status.assert_not_called()  # COMPLETED held, not 422'd
+		mock_set.assert_called_once()  # SO flagged for manual review
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_INVOICING_NO_INVOICE, steps)
+
+	def test_completed_invoicing_failure_holds_status(self):
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(frappe.db, "sql", return_value=[{"name": "IV-1", "grand_total": 100.0}]),
+			patch.object(
+				order_status_pusher.wave_client, "post_order_invoicing",
+				side_effect=WaveOutboundError("422", http_status=422, wave_code="ORDER0050"),
+			),
+			patch.object(order_status_pusher.wave_client, "post_order_status") as mock_status,
+			patch.object(order_status_pusher, "log_step") as mock_log,
+		):
+			_push(payload={"status": "COMPLETED"})
+		mock_status.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status_pusher.STEP_INVOICING_FAILED, steps)
+
+	def test_non_completed_status_does_not_invoice(self):
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(order_status_pusher.wave_client, "post_order_invoicing") as mock_inv,
+			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={}) as mock_status,
+			patch.object(order_status_pusher, "log_step"),
+		):
+			_push(payload={"status": "INVOICING"})
+		mock_inv.assert_not_called()
+		mock_status.assert_called_once()
