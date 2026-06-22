@@ -103,7 +103,8 @@ def on_delivery_note_submit(doc, method=None) -> None:
 
 
 def autopopulate_from_wave_so(doc, method=None) -> None:
-	"""before_insert hook: pull delivery_date + (pickup) driver from the linked Wave SO.
+	"""before_insert hook: pull delivery_date, wave_delivery_type/time, the customer
+	wave_comments, and the (pickup) driver from the linked Wave SO.
 
 	Fires exactly once at DN creation. Five guard clauses keep the path short
 	and the mutating block obvious:
@@ -141,6 +142,9 @@ def autopopulate_from_wave_so(doc, method=None) -> None:
 	if primary.get("wave_delivery_time"):
 		doc.wave_delivery_time = primary.get("wave_delivery_time")
 		autopopulated["wave_delivery_time"] = primary.get("wave_delivery_time")
+	if primary.get("wave_comments"):
+		doc.wave_comments = primary.get("wave_comments")
+		autopopulated["wave_comments"] = primary.get("wave_comments")
 
 	delivery_type = (primary.get("wave_delivery_type") or "").strip()
 	if delivery_type == "Pickup" and not (doc.driver or ""):
@@ -155,11 +159,11 @@ def autopopulate_from_wave_so(doc, method=None) -> None:
 
 
 def _read_wave_so(wave_order_id: str):
-	"""Return the SO's delivery_date + wave_delivery_type + wave_delivery_time via one DB read, or None."""
+	"""Return the SO's delivery_date + wave_delivery_type/time + wave_comments via one DB read, or None."""
 	row = frappe.db.get_value(
 		"Sales Order",
 		{"wave_order_id": wave_order_id},
-		["name", "delivery_date", "wave_delivery_type", "wave_delivery_time"],
+		["name", "delivery_date", "wave_delivery_type", "wave_delivery_time", "wave_comments"],
 		as_dict=True,
 	)
 	return row or None

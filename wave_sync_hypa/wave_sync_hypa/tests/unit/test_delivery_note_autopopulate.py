@@ -33,6 +33,7 @@ def _dn(items: list | None = None, driver: str = "") -> SimpleNamespace:
 		driver=driver,
 		wave_delivery_type=None,
 		wave_delivery_time=None,
+		wave_comments=None,
 	)
 	values = {"items": items or [], "wave_order_id": ""}
 	doc.get = lambda key, default=None: values.get(key, default)
@@ -58,6 +59,7 @@ def _so_row(
 	delivery_date=date(2026, 5, 20),
 	delivery_type: str = "Delivery",
 	delivery_time: str = "09:00 - 12:00",
+	comments: str = "Leave at the gate",
 ) -> dict:
 	"""Row matching what _read_wave_so returns (as_dict=True)."""
 	return {
@@ -65,6 +67,7 @@ def _so_row(
 		"delivery_date": delivery_date,
 		"wave_delivery_type": delivery_type,
 		"wave_delivery_time": delivery_time,
+		"wave_comments": comments,
 	}
 
 
@@ -125,10 +128,10 @@ class TestAutopopulateFromWaveSo(FrappeTestCase):
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(dn_handler.STEP_AUTOPOPULATED, steps)
 
-	def test_stamps_wave_delivery_type_and_time_onto_dn(self):
-		"""Both wave_delivery_type and wave_delivery_time are carried from the SO onto the DN."""
+	def test_stamps_wave_delivery_type_time_and_comments_onto_dn(self):
+		"""wave_delivery_type, wave_delivery_time and wave_comments are carried from the SO onto the DN."""
 		doc = _dn(items=[_item("SAL-ORD-001")])
-		so_row = _so_row(delivery_type="Delivery", delivery_time="09:00 - 12:00")
+		so_row = _so_row(delivery_type="Delivery", delivery_time="09:00 - 12:00", comments="Leave at the gate")
 
 		def _get_value_dispatch(*args, **kwargs):
 			if args[0] == "Sales Order" and args[1] == "SAL-ORD-001":
@@ -143,6 +146,7 @@ class TestAutopopulateFromWaveSo(FrappeTestCase):
 			dn_handler.autopopulate_from_wave_so(doc)
 		self.assertEqual(doc.wave_delivery_type, "Delivery")
 		self.assertEqual(doc.wave_delivery_time, "09:00 - 12:00")
+		self.assertEqual(doc.wave_comments, "Leave at the gate")
 
 	def test_pickup_type_with_configured_driver_stamps_both(self):
 		doc = _dn(items=[_item("SAL-ORD-002")])
