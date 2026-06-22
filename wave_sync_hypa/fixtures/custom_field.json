@@ -708,6 +708,20 @@
   "translatable": 0
  },
  {
+  "description": "Customer's delivery notes, carried from the linked Wave Sales Order at DN creation (autopopulate_from_wave_so). Read-only.",
+  "doctype": "Custom Field",
+  "dt": "Delivery Note",
+  "fieldname": "wave_comments",
+  "fieldtype": "Long Text",
+  "insert_after": "wave_delivery_time",
+  "label": "Wave Customer Comments",
+  "modified": "2026-06-22 00:00:00",
+  "name": "Delivery Note-wave_comments",
+  "no_copy": 1,
+  "read_only": 1,
+  "translatable": 0
+ },
+ {
   "doctype": "Custom Field",
   "dt": "Sales Invoice",
   "fieldname": "wave_order_id",
