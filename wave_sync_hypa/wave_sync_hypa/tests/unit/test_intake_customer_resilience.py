@@ -61,7 +61,8 @@ class TestDeliveryDateClamp(FrappeTestCase):
 
 	def test_delivery_date_clamped_to_transaction_date(self):
 		settings = SimpleNamespace(
-			default_company="C", default_currency="KES", default_price_list="PL", default_warehouse="WH"
+			default_company="C", default_currency="KES", default_price_list="PL", default_warehouse="WH",
+			price_scale_divisor=100,
 		)
 		payload = {
 			"_id": "W", "friendlyId": "1", "status": "PENDING", "deliveryService": "standard",

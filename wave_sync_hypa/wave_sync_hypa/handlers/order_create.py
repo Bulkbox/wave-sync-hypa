@@ -253,6 +253,11 @@ def _build_sales_order_header(
 			"po_no": payload.get("friendlyId"),
 			"wave_order_id": payload.get("_id"),
 			"wave_friendly_id": payload.get("friendlyId"),
+			# Wave's own order total (post-discount), kept so completion can send it
+			# back as the invoicing receiptPrice and never exceed Wave's order total.
+			"wave_order_total": cents_to_major(
+				payload.get("totalPrice"), int(settings.price_scale_divisor or 100)
+			),
 			"wave_status": payload.get("status"),
 			"wave_correlation_id": correlation_id,
 			"wave_delivery_type": _classify_delivery_type(payload),
