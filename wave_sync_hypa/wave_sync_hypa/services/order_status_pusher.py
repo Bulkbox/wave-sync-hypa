@@ -36,6 +36,7 @@ from wave_sync_hypa.wave_sync_hypa.services.master_switch import (
 )
 from wave_sync_hypa.wave_sync_hypa.services.wave_config import resolve_outbound_config
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveOutboundError
+from wave_sync_hypa.wave_sync_hypa.utils.money import major_to_cents
 
 STEP_PUSH_ATTEMPT = "order_status_push_attempt"
 STEP_PUSH_SUCCESS = "order_status_push_success"
@@ -48,6 +49,12 @@ STEP_PUSH_ABORTED_EMPTY_PAYLOAD = "order_status_push_aborted_empty_payload"
 STEP_PUSH_DELIVERY_STATUS_UNSUPPORTED = "order_status_push_delivery_status_unsupported"
 STEP_PUSH_UNEXPECTED_ERROR = "order_status_push_unexpected_error"
 STEP_WORKER_STARTED = "order_status_push_worker_started"
+# COMPLETED requires invoicing details to be saved on the Wave order first.
+STEP_INVOICING_ATTEMPT = "order_invoicing_attempt"
+STEP_INVOICING_SUCCESS = "order_invoicing_success"
+STEP_INVOICING_FAILED = "order_invoicing_failed"
+STEP_INVOICING_NO_INVOICE = "order_invoicing_no_sales_invoice"
+STEP_INVOICING_NO_WAVE_TOTAL = "order_invoicing_no_wave_order_total"
 
 # Wave application-level error codes that mean "the order moved past the
 # state we tried to set on it" (or "you can't act on this terminal order").
@@ -248,6 +255,15 @@ def _push_inner(
 		_post_cancel_via_reject(source_doctype, source_docname, erp_event, correlation_id, wave_order_id, config)
 		return
 
+	# Wave refuses status -> COMPLETED with ORDER0050 until the order carries
+	# invoicing details. Save them from the order's Sales Invoice first; if there's
+	# no invoice to draw from, hold COMPLETED (flagged for review) rather than 422.
+	if (status_name or "").upper() == "COMPLETED":
+		if not _ensure_invoicing_details(
+			source_doctype, source_docname, erp_event, correlation_id, wave_order_id, config
+		):
+			return
+
 	_post_status(source_doctype, source_docname, erp_event, correlation_id, wave_order_id, config, status_name)
 
 
@@ -330,6 +346,113 @@ def _post_status(
 		response_body=response,
 	)
 	_stamp_so_wave_status(wave_order_id, status_name)
+
+
+def _ensure_invoicing_details(
+	source_doctype: str,
+	source_docname: str,
+	erp_event: str,
+	correlation_id: str,
+	wave_order_id: str,
+	config: dict,
+) -> bool:
+	"""Save the order's invoicing details to Wave before COMPLETED; return whether to proceed.
+
+	Wave's COMPLETED transition is refused (ORDER0050) until the order has invoicing
+	details. We source them from the order's submitted Sales Invoice and POST to
+	`/invoicing`. Returns False — caller holds COMPLETED — when there's no Sales
+	Invoice to invoice from (the order is flagged for review instead of completed
+	blind) or when Wave rejects the invoicing call.
+	"""
+	invoice = _resolve_sales_invoice(wave_order_id)
+	if not invoice:
+		_flag_order_review(wave_order_id)
+		log_step(
+			correlation_id=correlation_id, step=STEP_INVOICING_NO_INVOICE, level="Warning",
+			doc_type=source_doctype, action=erp_event,
+			linked_doctype=source_doctype, linked_docname=source_docname, wave_id=wave_order_id,
+			error_message="No submitted Sales Invoice for this order; cannot send Wave invoicing "
+			"details, so COMPLETED is held for review.",
+		)
+		return False
+
+	# receiptPrice must match Wave's own order total exactly (it rejects anything
+	# greater, ORDER0003), so we send the totalPrice captured at intake — not ERP's
+	# recomputed, tax-loaded grand_total.
+	if not invoice.get("wave_order_total"):
+		_flag_order_review(wave_order_id)
+		log_step(
+			correlation_id=correlation_id, step=STEP_INVOICING_NO_WAVE_TOTAL, level="Warning",
+			doc_type=source_doctype, action=erp_event,
+			linked_doctype=source_doctype, linked_docname=source_docname, wave_id=wave_order_id,
+			error_message="Sales Order has no captured Wave order total (wave_order_total); cannot "
+			"set the invoicing receipt price, so COMPLETED is held for review.",
+		)
+		return False
+
+	divisor = int(frappe.get_cached_doc("Wave Settings").get("price_scale_divisor") or 100)
+	body = {
+		"receiptNumber": invoice["name"],
+		"receiptPrice": major_to_cents(invoice["wave_order_total"], divisor),
+		"vendorInvoiceNumber": invoice["name"],
+	}
+	url_path = f"/api/v3/admin/orders/{wave_order_id}/invoicing"
+	log_step(
+		correlation_id=correlation_id, step=STEP_INVOICING_ATTEMPT, level="Info",
+		doc_type=source_doctype, action=erp_event,
+		linked_doctype=source_doctype, linked_docname=source_docname, wave_id=wave_order_id,
+		request_body={"method": "POST", "path": url_path, "body": body},
+	)
+	try:
+		response = wave_client.post_order_invoicing(
+			base_url=config["base_url"], api_key=config["api_key"], app_id=config["app_id"],
+			order_id=wave_order_id, body=body,
+		)
+	except WaveOutboundError as exc:
+		log_step(
+			correlation_id=correlation_id, step=STEP_INVOICING_FAILED, level="Error",
+			doc_type=source_doctype, action=erp_event,
+			linked_doctype=source_doctype, linked_docname=source_docname, wave_id=wave_order_id,
+			request_body={"path": url_path, "body": body},
+			error_message=str(exc), stack_trace=frappe.get_traceback(),
+		)
+		return False
+
+	log_step(
+		correlation_id=correlation_id, step=STEP_INVOICING_SUCCESS, level="Success",
+		doc_type=source_doctype, action=erp_event,
+		linked_doctype=source_doctype, linked_docname=source_docname, wave_id=wave_order_id,
+		request_body={"path": url_path, "body": body}, response_body=response,
+	)
+	return True
+
+
+def _resolve_sales_invoice(wave_order_id: str) -> dict | None:
+	"""Return {name, wave_order_total} for the order's latest submitted Sales Invoice, or None.
+
+	`wave_order_total` is the Wave order total captured on the Sales Order at intake —
+	the receiptPrice we send so the invoice never exceeds Wave's own order total.
+	"""
+	rows = frappe.db.sql(
+		"""
+		SELECT si.name, so.wave_order_total
+		FROM `tabSales Invoice` si
+		JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
+		JOIN `tabSales Order` so ON so.name = sii.sales_order
+		WHERE so.wave_order_id = %s AND si.docstatus = 1 AND si.is_return = 0
+		ORDER BY si.creation DESC LIMIT 1
+		""",
+		wave_order_id,
+		as_dict=True,
+	)
+	return rows[0] if rows else None
+
+
+def _flag_order_review(wave_order_id: str) -> None:
+	"""Flag the Wave-linked Sales Order for manual review (held COMPLETED needs attention)."""
+	sales_order = frappe.db.get_value("Sales Order", {"wave_order_id": wave_order_id}, "name")
+	if sales_order:
+		frappe.db.set_value("Sales Order", sales_order, "wave_manual_review_required", 1, update_modified=False)
 
 
 def _post_cancel_via_reject(

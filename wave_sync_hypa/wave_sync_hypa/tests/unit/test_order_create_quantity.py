@@ -65,3 +65,30 @@ class TestResolvedItemsAudit(FrappeTestCase):
 		with patch.object(order_create, "log_step") as mock_log:
 			order_create._log_items_resolved("corr", payload, 1)
 		self.assertNotIn("purchase_step_applied", mock_log.call_args.kwargs["response_body"])
+
+
+class TestHeaderWaveOrderTotal(FrappeTestCase):
+	"""The intake header captures Wave's order totalPrice for use at completion."""
+
+	def _settings(self):
+		return SimpleNamespace(
+			default_company="C", default_currency="KES", default_price_list="PL",
+			default_warehouse="W", price_scale_divisor=100,
+		)
+
+	def _build(self, payload):
+		return order_create._build_sales_order_header(self._settings(), "CUST", None, payload, "corr")
+
+	def test_stamps_wave_order_total_from_payload(self):
+		doc = self._build(
+			{"_id": "w1", "friendlyId": "f1", "status": "PENDING",
+			 "createdAt": "2026-06-20T10:00:00Z", "totalPrice": 963000}
+		)
+		# 963000 minor units / divisor 100 -> 9630.0 major (round-trips back to 963000 cents).
+		self.assertEqual(doc.wave_order_total, 9630.0)
+
+	def test_wave_order_total_zero_when_absent(self):
+		doc = self._build(
+			{"_id": "w1", "friendlyId": "f1", "status": "PENDING", "createdAt": "2026-06-20T10:00:00Z"}
+		)
+		self.assertEqual(doc.wave_order_total, 0.0)

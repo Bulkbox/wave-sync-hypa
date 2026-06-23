@@ -131,6 +131,20 @@
   "translatable": 0
  },
  {
+  "description": "Wave's order totalPrice (post-discount), captured at intake. Sent back to Wave as the invoicing receiptPrice when the order completes, so the receipt matches exactly what Wave charged. Read-only.",
+  "doctype": "Custom Field",
+  "dt": "Sales Order",
+  "fieldname": "wave_order_total",
+  "fieldtype": "Currency",
+  "insert_after": "wave_friendly_id",
+  "label": "Wave Order Total",
+  "modified": "2026-06-22 00:00:00",
+  "name": "Sales Order-wave_order_total",
+  "no_copy": 1,
+  "read_only": 1,
+  "translatable": 0
+ },
+ {
   "doctype": "Custom Field",
   "dt": "Sales Order",
   "fieldname": "wave_status",
