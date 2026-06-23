@@ -50,6 +50,21 @@
   "translatable": 0
  },
  {
+  "default": "0",
+  "description": "When on, this customer's ERP-originated orders and all ERP → Wave updates (order push, status, payment, pick list) are never synced to Wave. Inbound Wave → ERP orders are unaffected.",
+  "doctype": "Custom Field",
+  "dt": "Customer",
+  "fieldname": "wave_erp_to_wave_disabled",
+  "fieldtype": "Check",
+  "hidden": 0,
+  "ignore_user_permissions": 0,
+  "insert_after": "is_wave_customer",
+  "label": "ERP to Wave Disabled",
+  "modified": "2026-06-23 00:00:00",
+  "name": "Customer-wave_erp_to_wave_disabled",
+  "translatable": 0
+ },
+ {
   "doctype": "Custom Field",
   "dt": "Address",
   "fieldname": "wave_address_id",

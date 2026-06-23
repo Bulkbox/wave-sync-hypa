@@ -146,6 +146,12 @@ class TestStampWaveOrderId(FrappeTestCase):
 class TestAfterPickListInsert(FrappeTestCase):
 	"""after_insert hook: rule-driven status dispatch + Check-gated batch-IDs stub."""
 
+	def setUp(self):
+		# These tests pre-date the per-customer gate and aren't about it; neutralise it.
+		patcher = patch.object(pl_handler, "_disabled_customer_for_pick_list", return_value=None)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
 	def test_dispatches_status_for_every_wave_linked_pick_list(self):
 		"""Status channel fires unconditionally — rule resolver decides whether ACCEPTED is sent."""
 		doc = _pl(locations=[_row("SO-001"), _row("SO-002")])
@@ -363,3 +369,33 @@ class TestAfterPickListInsert(FrappeTestCase):
 		)
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pl_handler.STEP_BATCH_IDS_IDENTIFIER_FAILED, steps)
+
+
+class TestPickListCustomerGate(FrappeTestCase):
+	"""A disabled customer skips both the pick-list status dispatch and the batch push."""
+
+	def test_disabled_customer_skips_pick_list_push(self):
+		doc = _pl(wave_order_id=WAVE_ID_A, locations=[])
+		with (
+			patch.object(pl_handler, "skip_if_disabled", return_value=False),
+			patch.object(pl_handler, "_disabled_customer_for_pick_list", return_value="CUST-1"),
+			patch.object(pl_handler.order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
+			patch.object(pl_handler, "_enqueue_batch_ids_pushes") as mock_batch,
+			patch.object(pl_handler, "log_step") as mock_log,
+		):
+			pl_handler.after_pick_list_insert(doc)
+		mock_dispatch.assert_not_called()
+		mock_batch.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(pl_handler.wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED, steps)
+
+	def test_helper_resolves_customer_from_the_sales_order(self):
+		"""_disabled_customer_for_pick_list reads the SO behind the Wave order, not Pick List.customer."""
+		def _get_value(*args, **kwargs):
+			if args[0] == "Sales Order":
+				return "CUST-1"  # SO behind the wave order
+			return 1  # Customer.wave_erp_to_wave_disabled
+		with patch.object(frappe.db, "get_value", side_effect=_get_value):
+			self.assertEqual(pl_handler._disabled_customer_for_pick_list([WAVE_ID_A]), "CUST-1")
+		with patch.object(frappe.db, "get_value", return_value=None):
+			self.assertIsNone(pl_handler._disabled_customer_for_pick_list([WAVE_ID_A]))

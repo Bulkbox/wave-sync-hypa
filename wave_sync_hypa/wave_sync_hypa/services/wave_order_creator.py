@@ -78,6 +78,11 @@ def push_so_to_wave(so_name: str, correlation_id: str) -> dict:
 			so_name, correlation_id, STEP_PUSH_ABORTED_ALREADY_PUSHED,
 			f"Sales Order is already linked to Wave order {so.wave_order_id}.",
 		)
+	if wave_customer_resolver.is_erp_to_wave_disabled(so.get("customer")):
+		return _abort_silently(
+			so_name, correlation_id, wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED,
+			f"Customer {so.get('customer')!r} is ERP → Wave disabled; not pushing.",
+		)
 
 	log_step(
 		correlation_id, STEP_PUSH_ATTEMPT, "Info",

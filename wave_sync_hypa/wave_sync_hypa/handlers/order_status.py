@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import frappe
 
-from wave_sync_hypa.wave_sync_hypa.services import order_status_resolver
+from wave_sync_hypa.wave_sync_hypa.services import order_status_resolver, wave_customer_resolver
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
@@ -93,6 +93,14 @@ def maybe_auto_push_to_wave(doc, method=None) -> None:
 			"Info",
 			doc,
 			"Sales Order originated from a Wave webhook; nothing to push.",
+		)
+		return
+	if wave_customer_resolver.is_erp_to_wave_disabled(doc.get("customer")):
+		_log_auto_push(
+			wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED,
+			"Info",
+			doc,
+			f"Customer {doc.get('customer')!r} is ERP → Wave disabled; nothing to push.",
 		)
 		return
 
@@ -203,6 +211,19 @@ def dispatch_with_wave_order_ids(
 			linked_doctype=doc.doctype,
 			linked_docname=doc.name,
 			error_message="outbound_order_status_sync_enabled is off.",
+		)
+		return
+
+	if wave_customer_resolver.is_erp_to_wave_disabled(doc.get("customer")):
+		log_step(
+			correlation_id=correlation_id,
+			step=wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED,
+			level="Info",
+			doc_type=doc.doctype,
+			action=event,
+			linked_doctype=doc.doctype,
+			linked_docname=doc.name,
+			error_message=f"Customer {doc.get('customer')!r} is ERP → Wave disabled; not pushing status.",
 		)
 		return
 

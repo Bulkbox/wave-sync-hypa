@@ -35,7 +35,7 @@ from __future__ import annotations
 import frappe
 
 from wave_sync_hypa.wave_sync_hypa.handlers import order_status
-from wave_sync_hypa.wave_sync_hypa.services import picker_identifier
+from wave_sync_hypa.wave_sync_hypa.services import picker_identifier, wave_customer_resolver
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
@@ -129,11 +129,35 @@ def after_pick_list_insert(doc, method=None) -> None:
 		)
 		return
 
+	# Pick List.customer isn't reliably set for Wave SO-derived pick lists, so resolve
+	# the owning customer from the Sales Order behind each Wave order id instead.
+	disabled_customer = _disabled_customer_for_pick_list(wave_ids)
+	if disabled_customer:
+		log_step(
+			correlation_id=new_correlation_id(),
+			step=wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED,
+			level="Info",
+			doc_type=doc.doctype,
+			linked_doctype=doc.doctype,
+			linked_docname=doc.name,
+			error_message=f"Customer {disabled_customer!r} is ERP → Wave disabled; not pushing pick list.",
+		)
+		return
+
 	order_status.dispatch_with_wave_order_ids(doc, "after_insert", wave_ids)
 
 	settings = frappe.get_cached_doc("Wave Settings")
 	if settings.get("pick_list_batch_ids_push_enabled"):
 		_enqueue_batch_ids_pushes(doc, wave_ids, settings)
+
+
+def _disabled_customer_for_pick_list(wave_ids: list[str]) -> str | None:
+	"""Return the first ERP -> Wave-disabled customer behind these Wave orders, or None."""
+	for wave_order_id in wave_ids:
+		customer = frappe.db.get_value("Sales Order", {"wave_order_id": wave_order_id}, "customer")
+		if wave_customer_resolver.is_erp_to_wave_disabled(customer):
+			return customer
+	return None
 
 
 def _enqueue_batch_ids_pushes(doc, wave_ids: list[str], settings) -> None:
