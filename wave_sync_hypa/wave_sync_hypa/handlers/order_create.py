@@ -67,9 +67,9 @@ def handle(payload: dict, correlation_id: str) -> None:
 	_apply_payment_metadata(sales_order, settings, payload, correlation_id)
 	_apply_wave_comments(sales_order, payload)
 	_persist_sales_order(sales_order)
-	# Wave owns coupons: we never create or apply them, just flag every couponed
-	# order so the team verifies the coupon.
-	coupon_reviews = _review_coupons(payload, settings)
+	# Wave owns coupons: apply an existing ERP coupon but never create one, and flag
+	# every couponed order so the team verifies it.
+	coupon_reviews = _review_coupons(sales_order, payload, settings)
 
 	if skipped_items:
 		_annotate_sales_order_for_skipped_items(
@@ -458,13 +458,15 @@ def _build_fee_line(item_code: str, fee_type: str, amount_major: float, sales_or
 	return line
 
 
-def _review_coupons(payload: dict, settings) -> list[dict]:
-	"""Flag every coupon on the order for team review; never create or apply (Wave owns coupons).
+def _review_coupons(sales_order, payload: dict, settings) -> list[dict]:
+	"""Apply an existing ERP coupon to the order and always flag it for team review.
 
-	Gated by Wave Settings.coupon_sync_enabled. Returns one entry per coupon
-	({code, amount_major, found}) so the caller flags the SO + fires the review
-	ToDo. Empty when the alarm is off or the order carries no coupon. The SO's
-	native coupon_code is deliberately never touched, so ERPNext applies no discount.
+	Gated by Wave Settings.coupon_sync_enabled. For each coupon on the order we look
+	up (never create) a matching ERP Coupon Code; if found, we apply it to the SO's
+	native coupon_code (the first that applies — there is only one slot) so its
+	discount takes effect. A coupon not present in ERP is alarmed only. Either way an
+	entry is returned so the caller flags the SO + fires the review ToDo. Empty when
+	the alarm is off or the order carries no coupon.
 	"""
 	if not settings.get("coupon_sync_enabled"):
 		return []
@@ -472,12 +474,37 @@ def _review_coupons(payload: dict, settings) -> list[dict]:
 	reviews = []
 	for option in _extract_coupons(payload):
 		code = (option.get("value") or "").strip()
-		reviews.append({
+		existing = find_coupon_code(code)
+		entry = {
 			"code": code,
 			"amount_major": cents_to_major(option.get("amount"), divisor),
-			"found": bool(find_coupon_code(code)),
-		})
+			"found": bool(existing),
+			"applied": False,
+			"error": None,
+		}
+		# One native coupon_code slot: apply the first found coupon that ERPNext accepts.
+		if existing and not sales_order.get("coupon_code"):
+			entry["applied"], entry["error"] = _apply_existing_coupon(sales_order, existing)
+		reviews.append(entry)
 	return reviews
+
+
+def _apply_existing_coupon(sales_order, coupon_name: str) -> tuple[bool, str | None]:
+	"""Set the SO's native coupon_code to an EXISTING coupon and re-save inside a savepoint.
+
+	Never creates a coupon. A discount ERPNext rejects (e.g. larger than the order
+	total) is rolled back and reported, so the order itself is never lost. Returns
+	(applied, error).
+	"""
+	frappe.db.savepoint("wave_coupon")
+	try:
+		sales_order.coupon_code = coupon_name
+		sales_order.save(ignore_permissions=True)
+		return True, None
+	except Exception as exc:
+		frappe.db.rollback(save_point="wave_coupon")
+		sales_order.coupon_code = None
+		return False, str(exc)
 
 
 def _extract_coupons(payload: dict) -> list[dict]:
@@ -512,16 +539,15 @@ def _annotate_coupons_for_review(
 
 
 def _coupon_review_message(entry: dict) -> str:
-	"""Human message for one coupon: confirm an existing ERP coupon, or flag a missing one."""
-	if entry["found"]:
-		return (
-			f"Coupon {entry['code']!r} (amount {entry['amount_major']}) exists in ERP — "
-			"confirm it is correct and applied to this order."
-		)
-	return (
-		f"Coupon {entry['code']!r} (amount {entry['amount_major']}) is on the Wave order "
-		"but no matching ERP Coupon Code exists — add it or correct the order."
-	)
+	"""Human message for one coupon: applied / could-not-apply / missing-in-ERP — always review."""
+	head = f"Coupon {entry['code']!r} (amount {entry['amount_major']})"
+	if not entry["found"]:
+		return f"{head} is on the Wave order but no matching ERP Coupon Code exists — add it or correct the order."
+	if entry["applied"]:
+		return f"{head} found in ERP and applied to this order — confirm it is correct."
+	if entry["error"]:
+		return f"{head} exists in ERP but could not be applied ({entry['error']}) — review."
+	return f"{head} exists in ERP but was not applied (another coupon is already on this order) — review."
 
 
 def _fee_line_item_tax_template(settings, fee_type: str) -> str:
