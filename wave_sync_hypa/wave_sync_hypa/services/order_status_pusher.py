@@ -329,6 +329,7 @@ def _post_status(
 		request_body={"path": url_path, "status_name": status_name},
 		response_body=response,
 	)
+	_stamp_so_wave_status(wave_order_id, status_name)
 
 
 def _post_cancel_via_reject(
@@ -410,6 +411,16 @@ def _post_cancel_via_reject(
 		},
 	)
 	_clear_so_banner_flags_on_cancel(source_docname, correlation_id, wave_order_id)
+	_stamp_so_wave_status(wave_order_id, "CANCELLED")
+
+
+def _stamp_so_wave_status(wave_order_id: str, status_name: str) -> None:
+	"""Mirror a just-accepted Wave status onto the Sales Order (read-only field; one SO per wave_order_id)."""
+	if not wave_order_id or not status_name:
+		return
+	frappe.db.set_value(
+		"Sales Order", {"wave_order_id": wave_order_id}, "wave_status", status_name, update_modified=False
+	)
 
 
 def _clear_so_banner_flags_on_cancel(

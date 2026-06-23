@@ -712,3 +712,63 @@ class TestCancelViaReject(FrappeTestCase):
 		]
 		self.assertEqual(len(entries), 1)
 		self.assertEqual(entries[0].kwargs.get("action"), "cancel")
+
+
+class TestWaveStatusWriteBack(FrappeTestCase):
+	"""A confirmed push mirrors the just-accepted status onto the Sales Order."""
+
+	def test_successful_push_stamps_wave_status(self):
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(order_status_pusher.wave_client, "post_order_status", return_value={}),
+			patch.object(frappe.db, "set_value") as mock_set,
+			patch.object(order_status_pusher, "log_step"),
+		):
+			_push(payload={"status": "INVOICING"})
+		mock_set.assert_called_once_with(
+			"Sales Order", {"wave_order_id": DUMMY_WAVE_ORDER_ID}, "wave_status", "INVOICING", update_modified=False
+		)
+
+	def test_failed_push_does_not_stamp_wave_status(self):
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(
+				order_status_pusher.wave_client, "post_order_status",
+				side_effect=WaveOutboundError("boom", http_status=500),
+			),
+			patch.object(frappe.db, "set_value") as mock_set,
+			patch.object(order_status_pusher, "log_step"),
+		):
+			_push(payload={"status": "INVOICING"})
+		mock_set.assert_not_called()
+
+	def test_cancel_via_reject_success_stamps_cancelled(self):
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(order_status_pusher.wave_client, "reject_admin_order", return_value={"_id": "x"}),
+			patch.object(frappe.db, "set_value") as mock_set,
+			patch.object(order_status_pusher, "log_step"),
+		):
+			_push(payload={"status": "CANCELLED"}, event="cancel", source_doctype="Sales Order")
+		mock_set.assert_any_call(
+			"Sales Order", {"wave_order_id": DUMMY_WAVE_ORDER_ID}, "wave_status", "CANCELLED", update_modified=False
+		)
+
+	def test_cancel_refusal_does_not_stamp_wave_status(self):
+		"""Wave refusing the cancel (e.g. ORDER0005 prepaid) must NOT stamp CANCELLED."""
+		settings = _stub_settings()
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=settings),
+			patch.object(
+				order_status_pusher.wave_client, "reject_admin_order",
+				side_effect=WaveOutboundError("cannot cancel", http_status=422, wave_code="ORDER0005"),
+			),
+			patch.object(frappe.db, "set_value") as mock_set,
+			patch.object(order_status_pusher, "log_step"),
+		):
+			_push(payload={"status": "CANCELLED"}, event="cancel", source_doctype="Sales Order")
+		stamped = [c for c in mock_set.call_args_list if "wave_status" in c.args]
+		self.assertEqual(stamped, [])

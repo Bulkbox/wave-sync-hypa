@@ -39,6 +39,7 @@ from .test_json_tools import *  # noqa: F401, F403
 from .test_money import *  # noqa: F401, F403
 from .test_order_create_quantity import *  # noqa: F401, F403
 from .test_order_status_push import *  # noqa: F401, F403
+from .test_order_update_status_mirror import *  # noqa: F401, F403
 from .test_payment_entry_status_push import *  # noqa: F401, F403
 from .test_payment_metadata_intake import *  # noqa: F401, F403
 from .test_payment_review_flag import *  # noqa: F401, F403
