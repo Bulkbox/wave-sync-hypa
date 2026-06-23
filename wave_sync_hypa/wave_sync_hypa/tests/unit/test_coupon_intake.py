@@ -1,31 +1,19 @@
-"""Unit tests for the coupon intake step in handlers.order_create.
+"""Unit tests for the coupon review step in handlers.order_create.
 
-Exercises _extract_valid_coupon and _apply_coupon in isolation; resolve_coupon
-is patched at the module boundary so we pin the gating/guard/soft-fail wiring,
-not the resolver itself (covered by test_coupon_resolver).
+Exercises _extract_coupons, _review_coupons and the review message. We never
+apply coupons — every couponed order is flagged for team review with a
+found / not-found message. find_coupon_code is patched at the module boundary.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from wave_sync_hypa.wave_sync_hypa.handlers import order_create as oc
-from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveResolutionError
 
-
-class _FakeSO:
-	"""Minimal persisted-SO stand-in: a real grand_total + a save() that records calls."""
-
-	def __init__(self, grand_total: float = 9640.0):
-		self.grand_total = grand_total
-		self.saved = False
-
-	def save(self, **kwargs):
-		self.saved = True
+COUPON = {"type": "COUPON", "value": "HYPA10", "amount": 1000, "isValid": True}
 
 
 def _settings(enabled: int = 1, divisor: int = 100) -> MagicMock:
@@ -35,92 +23,72 @@ def _settings(enabled: int = 1, divisor: int = 100) -> MagicMock:
 	return s
 
 
-def _payload(coupon: dict | None = "default", subtotal_cents: int = 964000) -> dict:
-	if coupon == "default":
-		coupon = {"type": "COUPON", "value": "HYPA10", "amount": 1000, "isValid": True}
-	return {"paymentOptions": [coupon] if coupon else [], "orderItemsPrice": subtotal_cents}
+def _payload(*coupons: dict) -> dict:
+	return {"paymentOptions": list(coupons)}
 
 
-class TestExtractValidCoupon(FrappeTestCase):
-	def test_returns_valid_coupon(self):
-		self.assertEqual(oc._extract_valid_coupon(_payload())["value"], "HYPA10")
+class TestExtractCoupons(FrappeTestCase):
+	def test_returns_coupon_with_code(self):
+		self.assertEqual([o["value"] for o in oc._extract_coupons(_payload(COUPON))], ["HYPA10"])
 
-	def test_skips_invalid(self):
-		self.assertIsNone(oc._extract_valid_coupon(_payload(
-			{"type": "COUPON", "value": "X", "amount": 1000, "isValid": False})))
+	def test_includes_invalid_and_zero_amount(self):
+		# "Any coupon on the order" — Wave's isValid/amount must NOT filter it out.
+		out = oc._extract_coupons(_payload(
+			{"type": "COUPON", "value": "A", "amount": 0, "isValid": True},
+			{"type": "COUPON", "value": "B", "amount": 500, "isValid": False},
+		))
+		self.assertEqual([o["value"] for o in out], ["A", "B"])
 
-	def test_skips_zero_amount(self):
-		self.assertIsNone(oc._extract_valid_coupon(_payload(
-			{"type": "COUPON", "value": "X", "amount": 0, "isValid": True})))
+	def test_skips_codeless_and_non_coupon_options(self):
+		out = oc._extract_coupons(_payload(
+			{"type": "COUPON", "value": "  ", "amount": 100},
+			{"type": "cash", "amount": 100},
+		))
+		self.assertEqual(out, [])
 
-	def test_ignores_non_coupon_option(self):
-		self.assertIsNone(oc._extract_valid_coupon(_payload(
-			{"type": "cash", "amount": 1000, "isValid": True})))
-
-	def test_none_when_no_options(self):
-		self.assertIsNone(oc._extract_valid_coupon(_payload(coupon=None)))
+	def test_empty_when_no_options(self):
+		self.assertEqual(oc._extract_coupons({}), [])
 
 
-class TestApplyCoupon(FrappeTestCase):
+class TestReviewCoupons(FrappeTestCase):
 	def test_disabled_flag_is_a_no_op(self):
-		so = _FakeSO()
-		with patch.object(oc, "resolve_coupon") as mock_resolve:
-			skipped = oc._apply_coupon(so, _payload(), _settings(enabled=0), "c")
-		self.assertEqual(skipped, [])
-		mock_resolve.assert_not_called()
-		self.assertFalse(so.saved)
+		with patch.object(oc, "find_coupon_code") as mock_find:
+			reviews = oc._review_coupons(_payload(COUPON), _settings(enabled=0))
+		self.assertEqual(reviews, [])
+		mock_find.assert_not_called()
 
-	def test_applies_valid_coupon(self):
-		so = _FakeSO(grand_total=9640.0)
-		settings = _settings()
+	def test_no_coupon_is_a_no_op(self):
+		with patch.object(oc, "find_coupon_code") as mock_find:
+			reviews = oc._review_coupons(_payload(), _settings())
+		self.assertEqual(reviews, [])
+		mock_find.assert_not_called()
+
+	def test_found_coupon_marks_found_true(self):
+		with patch.object(oc, "find_coupon_code", return_value="HYPA10"):
+			reviews = oc._review_coupons(_payload(COUPON), _settings())
+		self.assertEqual(reviews, [{"code": "HYPA10", "amount_major": 10.0, "found": True}])
+
+	def test_missing_coupon_marks_found_false(self):
+		with patch.object(oc, "find_coupon_code", return_value=None):
+			reviews = oc._review_coupons(_payload(COUPON), _settings())
+		self.assertEqual(reviews[0]["found"], False)
+
+	def test_never_creates_or_applies_a_coupon(self):
+		"""Alarm-only: reviewing must never create a Coupon Code / Pricing Rule (no get_doc)."""
 		with (
-			patch.object(oc, "resolve_coupon", return_value="HYPA10") as mock_resolve,
-			patch.object(frappe.db, "savepoint"),
-			patch.object(frappe.db, "rollback"),
+			patch.object(oc, "find_coupon_code", return_value=None),
+			patch.object(oc.frappe, "get_doc") as mock_get_doc,
 		):
-			skipped = oc._apply_coupon(so, _payload(), settings, "corr-1")
-		self.assertEqual(skipped, [])
-		self.assertEqual(so.coupon_code, "HYPA10")
-		self.assertTrue(so.saved)
-		mock_resolve.assert_called_once_with("HYPA10", 10.0, settings, "corr-1")
+			oc._review_coupons(_payload(COUPON), _settings())
+		mock_get_doc.assert_not_called()
 
-	def test_amount_over_grand_total_is_skipped(self):
-		so = _FakeSO(grand_total=5.0)
-		with patch.object(oc, "resolve_coupon") as mock_resolve:
-			skipped = oc._apply_coupon(so, _payload(), _settings(), "c")
-		self.assertEqual(len(skipped), 1)
-		self.assertIn("exceeds order total", skipped[0]["error"])
-		mock_resolve.assert_not_called()
-		self.assertFalse(so.saved)
 
-	def test_resolution_failure_is_rolled_back_and_soft_failed(self):
-		so = _FakeSO()
-		with (
-			patch.object(oc, "resolve_coupon", side_effect=WaveResolutionError("nope")),
-			patch.object(frappe.db, "savepoint"),
-			patch.object(frappe.db, "rollback") as mock_rollback,
-		):
-			skipped = oc._apply_coupon(so, _payload(), _settings(), "c")
-		self.assertEqual(len(skipped), 1)
-		self.assertEqual(skipped[0]["code"], "HYPA10")
-		self.assertFalse(so.saved)
-		mock_rollback.assert_called_once_with(save_point="wave_coupon")
+class TestCouponReviewMessage(FrappeTestCase):
+	def test_found_message_asks_to_confirm(self):
+		msg = oc._coupon_review_message({"code": "HYPA10", "amount_major": 10.0, "found": True})
+		self.assertIn("exists in ERP", msg)
+		self.assertIn("HYPA10", msg)
 
-	def test_save_failure_is_rolled_back_and_soft_failed(self):
-		so = _FakeSO()
-		so.save = MagicMock(side_effect=Exception("discount exceeds total"))
-		with (
-			patch.object(oc, "resolve_coupon", return_value="HYPA10"),
-			patch.object(frappe.db, "savepoint"),
-			patch.object(frappe.db, "rollback") as mock_rollback,
-		):
-			skipped = oc._apply_coupon(so, _payload(), _settings(), "c")
-		self.assertEqual(len(skipped), 1)
-		mock_rollback.assert_called_once_with(save_point="wave_coupon")
-
-	def test_no_coupon_in_payload_is_a_no_op(self):
-		so = _FakeSO()
-		with patch.object(oc, "resolve_coupon") as mock_resolve:
-			skipped = oc._apply_coupon(so, _payload(coupon=None), _settings(), "c")
-		self.assertEqual(skipped, [])
-		mock_resolve.assert_not_called()
+	def test_missing_message_flags_absence(self):
+		msg = oc._coupon_review_message({"code": "HYPA10", "amount_major": 10.0, "found": False})
+		self.assertIn("no matching ERP Coupon Code", msg)

@@ -61,7 +61,6 @@
   "business_type_mappings",
   "coupons_section",
   "coupon_sync_enabled",
-  "coupon_apply_discount_on",
   "ipay_section",
   "ipay_verification_enabled",
   "wave_payment_review_assignee"
@@ -417,19 +416,10 @@
   },
   {
    "default": "0",
-   "description": "When on, a valid COUPON in an inbound Wave order is mirrored to an ERPNext Coupon Code (created if missing) and applied to the Sales Order. Off => coupons in the payload are ignored.",
+   "description": "When on, any inbound Wave order carrying a coupon raises a review alarm (ToDo + Sales Order review flag) so the team verifies the coupon. ERP coupons are never created or applied from Wave. Off => coupons in the payload are ignored.",
    "fieldname": "coupon_sync_enabled",
    "fieldtype": "Check",
-   "label": "Coupon Sync Enabled"
-  },
-  {
-   "default": "Grand Total",
-   "depends_on": "coupon_sync_enabled",
-   "description": "Whether a Wave coupon discounts the post-tax Grand Total or the pre-tax Net Total. Drives apply_discount_on on the coupon's Pricing Rule.",
-   "fieldname": "coupon_apply_discount_on",
-   "fieldtype": "Select",
-   "label": "Coupon Discount Base",
-   "options": "Grand Total\nNet Total"
+   "label": "Coupon Review Alarm Enabled"
   },
   {
    "fieldname": "ipay_section",
