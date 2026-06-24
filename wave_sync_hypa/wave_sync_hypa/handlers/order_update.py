@@ -43,6 +43,7 @@ STEP_REPLACEMENT_PRESENT = "pick_list_inbound_replacement_present"
 STEP_DISPARITY_PRESENT = "pick_list_inbound_disparity_present"
 STEP_ANNOTATED_SUBMITTED = "pick_list_inbound_annotated_submitted_pl"
 STEP_ANNOTATED_CANCELLED = "pick_list_inbound_annotated_cancelled_pl"
+STEP_STATUS_MIRRORED = "order_update_wave_status_mirrored"
 
 # Tolerance for float comparisons between Wave's reported picked qty and
 # ERPNext's total row qty. Wave sends integers today but the field is float
@@ -71,6 +72,9 @@ class ReconciliationOutcome:
 
 def handle(payload: dict, correlation_id: str) -> None:
 	"""Entry point for ORDER.UPDATE webhooks; filter, fan out across linked Pick Lists."""
+	# Mirror Wave's current order status onto the SO on every update, independent of
+	# the COLLECTED pick-reconcile path below, so wave_status tracks Wave-driven changes.
+	_mirror_wave_status_to_so(payload, correlation_id)
 	if not _is_picking_complete_signal(payload):
 		_log_ignored_not_collected(payload, correlation_id)
 		return
@@ -86,6 +90,31 @@ def handle(payload: dict, correlation_id: str) -> None:
 	index = _build_wave_picking_index(payload)
 	for name in pick_list_names:
 		_process_pick_list(name, payload, correlation_id, index, settings)
+
+
+def _mirror_wave_status_to_so(payload: dict, correlation_id: str) -> None:
+	"""Reflect Wave's current top-level order status onto the linked Sales Order; log only on change."""
+	wave_order_id = (payload.get("_id") or "").strip()
+	status = (payload.get("status") or "").strip()
+	if not wave_order_id or not status:
+		return
+	so = frappe.db.get_value(
+		"Sales Order", {"wave_order_id": wave_order_id}, ["name", "wave_status"], as_dict=True
+	)
+	if not so or so.wave_status == status:
+		return
+	frappe.db.set_value("Sales Order", so.name, "wave_status", status, update_modified=False)
+	log_step(
+		correlation_id=correlation_id,
+		step=STEP_STATUS_MIRRORED,
+		level="Info",
+		doc_type="ORDER",
+		action="UPDATE",
+		linked_doctype="Sales Order",
+		linked_docname=so.name,
+		wave_id=wave_order_id,
+		error_message=f"Wave status mirrored onto Sales Order: {so.wave_status!r} -> {status!r}.",
+	)
 
 
 def _is_picking_complete_signal(payload: dict) -> bool:
