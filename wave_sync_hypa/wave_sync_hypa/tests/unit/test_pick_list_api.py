@@ -48,6 +48,12 @@ def _settings_stub() -> MagicMock:
 class TestPushBatchIdsNow(FrappeTestCase):
 	"""Manual-trigger endpoint: enqueue per Wave order, bypass kill-switch."""
 
+	def setUp(self):
+		# These pre-date the per-customer gate and aren't about it; neutralise it.
+		patcher = patch.object(pl_handler, "_disabled_customer_for_pick_list", return_value=None)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
 	def test_returns_not_ok_when_pick_list_has_no_wave_orders(self):
 		doc = _pl_doc(locations=[_row("SO-NON-WAVE", item_code="X", batch_no="B-1")])
 		with (
@@ -122,3 +128,18 @@ class TestPushBatchIdsNow(FrappeTestCase):
 		):
 			pl_api.push_batch_ids_now("PICK-2026-0001")
 		doc.check_permission.assert_called_once_with("write")
+
+	def test_returns_not_ok_when_customer_erp_to_wave_disabled(self):
+		"""A flagged customer's manual batch-IDs push is suppressed (resolved from the SO)."""
+		doc = _pl_doc(wave_order_id=WAVE_ID_A)
+		with (
+			patch.object(frappe, "get_doc", return_value=doc),
+			patch.object(pl_api, "is_wave_integration_enabled", return_value=True),
+			patch.object(pl_handler, "_disabled_customer_for_pick_list", return_value="CUST-1"),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+			patch.object(pl_api, "log_step"),
+		):
+			result = pl_api.push_batch_ids_now("PICK-2026-0001")
+		self.assertFalse(result["ok"])
+		self.assertIn("ERP → Wave disabled", result["reason"])
+		mock_enqueue.assert_not_called()

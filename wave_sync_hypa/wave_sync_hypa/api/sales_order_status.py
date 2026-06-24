@@ -14,7 +14,7 @@ from wave_sync_hypa.wave_sync_hypa.handlers.order_status import (
 	WORKER_DOTTED_PATH,
 	STEP_ENQUEUED,
 )
-from wave_sync_hypa.wave_sync_hypa.services import order_status_resolver
+from wave_sync_hypa.wave_sync_hypa.services import order_status_resolver, wave_customer_resolver
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 
@@ -30,6 +30,10 @@ def resync_order_status(sales_order: str) -> dict:
 	_refuse_if_not_pushable(doc)
 	settings = frappe.get_doc("Wave Settings")
 	_refuse_if_settings_disabled(settings)
+	if wave_customer_resolver.is_erp_to_wave_disabled(doc.get("customer")):
+		frappe.throw(
+			_("Customer {0} is ERP → Wave disabled; status will not be pushed to Wave.").format(doc.get("customer"))
+		)
 
 	event = _event_from_docstatus(doc.docstatus)
 	payload = order_status_resolver.resolve_outbound_payload(doc, event, settings)

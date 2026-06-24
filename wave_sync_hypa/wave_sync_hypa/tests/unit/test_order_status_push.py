@@ -600,6 +600,20 @@ class TestResyncEndpoint(FrappeTestCase):
 		self.assertEqual(kwargs["source_docname"], DUMMY_SO)
 		self.assertEqual(kwargs["wave_order_id"], DUMMY_WAVE_ORDER_ID)
 
+	def test_refuses_when_customer_erp_to_wave_disabled(self):
+		so = _so_doc(docstatus=1, customer="CUST-1")
+		so.check_permission = lambda perm: None
+		settings = _stub_settings(rules=[_rule(wave_status="ACCEPTED")])
+		with (
+			patch.object(frappe, "only_for"),
+			patch.object(frappe, "get_doc", side_effect=[so, settings]),
+			patch.object(endpoint.wave_customer_resolver, "is_erp_to_wave_disabled", return_value=True),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				endpoint.resync_order_status(DUMMY_SO)
+		mock_enqueue.assert_not_called()
+
 
 
 class TestCancelViaReject(FrappeTestCase):
