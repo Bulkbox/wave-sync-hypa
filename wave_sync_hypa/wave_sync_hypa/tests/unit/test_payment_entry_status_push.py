@@ -272,3 +272,27 @@ class TestOnPaymentEntrySubmit(FrappeTestCase):
 			pe_handler.on_payment_entry_submit(doc)
 		mock_enqueue.assert_called_once()
 		self.assertEqual(mock_enqueue.call_args.args[1], WAVE_ID_A)
+
+
+class TestPaymentEntryCustomerGate(FrappeTestCase):
+	"""A disabled customer (PE.party) skips the paymentStatus push; party is resolved correctly."""
+
+	def _pe_with_party(self, party="CUST-1", party_type="Customer"):
+		values = {"references": [], "wave_order_id": "", "payment_type": "Receive",
+				  "party": party, "party_type": party_type}
+		doc = SimpleNamespace(doctype="Payment Entry", name="PE-GATE")
+		doc.get = lambda key, default=None: values.get(key, default)
+		return doc
+
+	def test_disabled_customer_skips_payment_push(self):
+		with (
+			patch.object(pe_handler, "skip_if_disabled", return_value=False),
+			patch.object(pe_handler.wave_customer_resolver, "is_erp_to_wave_disabled", return_value=True) as mock_disabled,
+			patch.object(pe_handler.payment_status_resolver, "resolve_status_for_wave_order") as mock_resolve,
+			patch.object(pe_handler, "log_step") as mock_log,
+		):
+			pe_handler.on_payment_entry_submit(self._pe_with_party())
+		mock_disabled.assert_called_once_with("CUST-1")  # party extracted as the customer
+		mock_resolve.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(pe_handler.wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED, steps)

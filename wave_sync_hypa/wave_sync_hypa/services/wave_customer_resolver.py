@@ -19,6 +19,17 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.utils.errors import WaveResolutionError
 
+# Shared step for every ERP -> Wave outbound path that short-circuits because the
+# customer is flagged ERP to Wave disabled; the log row's doc context says which path.
+STEP_ERP_TO_WAVE_CUSTOMER_DISABLED = "erp_to_wave_skipped_customer_disabled"
+
+
+def is_erp_to_wave_disabled(customer: str | None) -> bool:
+	"""True when the Customer is flagged ERP to Wave disabled (suppress all outbound sync)."""
+	if not customer:
+		return False
+	return bool(frappe.db.get_value("Customer", customer, "wave_erp_to_wave_disabled"))
+
 
 def resolve_wave_customer_for_so(sales_order, settings) -> str:
 	"""Return a Wave customer _id; raise WaveResolutionError when nothing resolvable.
