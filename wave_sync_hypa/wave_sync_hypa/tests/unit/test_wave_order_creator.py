@@ -255,3 +255,21 @@ class TestPushSoToWaveHappyPath(FrappeTestCase):
 			wave_order_creator.push_so_to_wave(SO_NAME, "corr-po-keep")
 		po_no_calls = [c for c in so.db_set.call_args_list if c.args and c.args[0] == "po_no"]
 		self.assertEqual(po_no_calls, [], "po_no must not be touched when already set.")
+
+
+class TestPushSoToWaveCustomerGate(FrappeTestCase):
+	"""A customer flagged ERP -> Wave disabled aborts the create push silently."""
+
+	def test_disabled_customer_aborts_before_http(self):
+		so = _so()  # no wave_order_id
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(frappe, "get_doc", return_value=so),
+			patch.object(wave_order_creator.wave_customer_resolver, "is_erp_to_wave_disabled", return_value=True),
+			patch.object(wave_order_creator.wave_client, "create_admin_order") as mock_create,
+			patch.object(wave_order_creator, "log_step") as mock_log,
+		):
+			result = wave_order_creator.push_so_to_wave(SO_NAME, "corr-cust-disabled")
+		self.assertFalse(result["ok"])
+		self.assertIn("ERP → Wave disabled", result["reason"])
+		mock_create.assert_not_called()

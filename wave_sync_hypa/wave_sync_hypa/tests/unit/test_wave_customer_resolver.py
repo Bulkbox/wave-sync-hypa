@@ -70,3 +70,18 @@ class TestResolveWaveCustomerForSo(FrappeTestCase):
 		self.assertEqual(result, DEFAULT_WAVE_ID)
 		# Cache lookup skipped when there's no Customer to look up against.
 		mock_get.assert_not_called()
+
+
+class TestIsErpToWaveDisabled(FrappeTestCase):
+	"""The shared per-customer ERP -> Wave suppression reader."""
+
+	def test_blank_customer_is_not_disabled(self):
+		self.assertFalse(wave_customer_resolver.is_erp_to_wave_disabled(None))
+		self.assertFalse(wave_customer_resolver.is_erp_to_wave_disabled(""))
+
+	def test_reads_flag_off_the_customer(self):
+		with patch.object(frappe.db, "get_value", return_value=1) as mock_get:
+			self.assertTrue(wave_customer_resolver.is_erp_to_wave_disabled("CUST-1"))
+		mock_get.assert_called_once_with("Customer", "CUST-1", "wave_erp_to_wave_disabled")
+		with patch.object(frappe.db, "get_value", return_value=0):
+			self.assertFalse(wave_customer_resolver.is_erp_to_wave_disabled("CUST-1"))

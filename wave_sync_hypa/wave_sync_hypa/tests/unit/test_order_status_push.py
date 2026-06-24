@@ -600,6 +600,20 @@ class TestResyncEndpoint(FrappeTestCase):
 		self.assertEqual(kwargs["source_docname"], DUMMY_SO)
 		self.assertEqual(kwargs["wave_order_id"], DUMMY_WAVE_ORDER_ID)
 
+	def test_refuses_when_customer_erp_to_wave_disabled(self):
+		so = _so_doc(docstatus=1, customer="CUST-1")
+		so.check_permission = lambda perm: None
+		settings = _stub_settings(rules=[_rule(wave_status="ACCEPTED")])
+		with (
+			patch.object(frappe, "only_for"),
+			patch.object(frappe, "get_doc", side_effect=[so, settings]),
+			patch.object(endpoint.wave_customer_resolver, "is_erp_to_wave_disabled", return_value=True),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				endpoint.resync_order_status(DUMMY_SO)
+		mock_enqueue.assert_not_called()
+
 
 
 class TestCancelViaReject(FrappeTestCase):
@@ -772,6 +786,22 @@ class TestWaveStatusWriteBack(FrappeTestCase):
 			_push(payload={"status": "CANCELLED"}, event="cancel", source_doctype="Sales Order")
 		stamped = [c for c in mock_set.call_args_list if "wave_status" in c.args]
 		self.assertEqual(stamped, [])
+
+
+class TestDispatchCustomerGate(FrappeTestCase):
+	"""A disabled customer skips the whole status-push fan-out."""
+
+	def test_disabled_customer_skips_dispatch(self):
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_stub_settings()),
+			patch.object(handler.wave_customer_resolver, "is_erp_to_wave_disabled", return_value=True),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+			patch.object(handler, "log_step") as mock_log,
+		):
+			handler.dispatch_with_wave_order_ids(_so_doc(customer="CUST-1"), "submit", [DUMMY_WAVE_ORDER_ID])
+		mock_enqueue.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(handler.wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED, steps)
 
 
 class TestCompletedInvoicing(FrappeTestCase):

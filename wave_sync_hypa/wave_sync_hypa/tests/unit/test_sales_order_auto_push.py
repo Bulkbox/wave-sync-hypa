@@ -113,3 +113,19 @@ class TestMaybeAutoPushToWave(FrappeTestCase):
 		self.assertIn(order_status.STEP_AUTO_PUSH_ENQUEUE_FAILED, steps)
 		# The success-row enqueued step must NOT be logged when enqueue failed.
 		self.assertNotIn(order_status.STEP_AUTO_PUSH_ENQUEUED, steps)
+
+
+class TestMaybeAutoPushCustomerGate(FrappeTestCase):
+	"""A disabled customer skips the auto-push enqueue entirely."""
+
+	def test_disabled_customer_does_not_enqueue(self):
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings()),
+			patch.object(order_status.wave_customer_resolver, "is_erp_to_wave_disabled", return_value=True),
+			patch.object(frappe, "enqueue") as mock_enqueue,
+			patch.object(order_status, "log_step") as mock_log,
+		):
+			order_status.maybe_auto_push_to_wave(_so())
+		mock_enqueue.assert_not_called()
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertIn(order_status.wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED, steps)

@@ -38,6 +38,7 @@ from wave_sync_hypa.wave_sync_hypa.services import (
 	payment_status_pusher,
 	payment_status_resolver,
 	payment_validator,
+	wave_customer_resolver,
 )
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
@@ -111,6 +112,19 @@ def on_payment_entry_submit(doc, method=None) -> None:
 				f"Payment Entry payment_type={doc.get('payment_type')!r}; only 'Receive' "
 				"PEs push to Wave (refunds are out of scope)."
 			),
+		)
+		return
+
+	customer = doc.get("party") if (doc.get("party_type") or "") == "Customer" else None
+	if wave_customer_resolver.is_erp_to_wave_disabled(customer):
+		log_step(
+			correlation_id=new_correlation_id(),
+			step=wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED,
+			level="Info",
+			doc_type=doc.doctype,
+			linked_doctype=doc.doctype,
+			linked_docname=doc.name,
+			error_message=f"Customer {customer!r} is ERP → Wave disabled; not pushing payment status.",
 		)
 		return
 

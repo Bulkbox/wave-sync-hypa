@@ -58,6 +58,14 @@ def push_so_to_wave(so_name: str, correlation_id: str) -> dict:
 			"ERP → Wave Order Push is disabled in Wave Settings.",
 		)
 
+	# Suppress a flagged customer silently, before any config/shop-id alarm path.
+	customer = frappe.db.get_value("Sales Order", so_name, "customer")
+	if wave_customer_resolver.is_erp_to_wave_disabled(customer):
+		return _abort_silently(
+			so_name, correlation_id, wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED,
+			f"Customer {customer!r} is ERP → Wave disabled; not pushing.",
+		)
+
 	config = resolve_outbound_config(settings)
 	if config is None:
 		return _abort_with_notification(

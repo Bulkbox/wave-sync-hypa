@@ -51,6 +51,19 @@ def push_batch_ids_now(pick_list: str) -> dict:
 		)
 		return {"ok": False, "reason": _("Pick List has no Wave-sourced Sales Orders.")}
 
+	disabled_customer = pl_handler._disabled_customer_for_pick_list(wave_ids)
+	if disabled_customer:
+		log_step(
+			correlation_id=correlation_id,
+			step=pl_handler.wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED,
+			level="Info",
+			doc_type="Pick List",
+			linked_doctype="Pick List",
+			linked_docname=doc.name,
+			error_message=f"Manual trigger: customer {disabled_customer!r} is ERP → Wave disabled; batch IDs not pushed.",
+		)
+		return {"ok": False, "reason": _("Customer {0} is ERP → Wave disabled; batch IDs will not be pushed.").format(disabled_customer)}
+
 	settings = frappe.get_cached_doc("Wave Settings")
 	grouped = pl_handler._group_batches_by_wave_order(doc, wave_ids, settings)
 
