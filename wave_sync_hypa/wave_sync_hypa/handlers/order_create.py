@@ -14,7 +14,7 @@ import frappe
 from frappe.utils import convert_utc_to_timezone, escape_html, get_system_timezone, getdate
 
 from wave_sync_hypa.wave_sync_hypa.resolvers.address_resolver import append_if_new
-from wave_sync_hypa.wave_sync_hypa.resolvers.coupon_resolver import resolve_coupon
+from wave_sync_hypa.wave_sync_hypa.resolvers.coupon_resolver import find_coupon_code
 from wave_sync_hypa.wave_sync_hypa.resolvers.customer_resolver import find_or_create_customer
 from wave_sync_hypa.wave_sync_hypa.resolvers.fee_resolver import resolve_fee
 from wave_sync_hypa.wave_sync_hypa.resolvers.item_resolver import resolve_sku
@@ -67,9 +67,9 @@ def handle(payload: dict, correlation_id: str) -> None:
 	_apply_payment_metadata(sales_order, settings, payload, correlation_id)
 	_apply_wave_comments(sales_order, payload)
 	_persist_sales_order(sales_order)
-	# Coupon is applied as a second save on the persisted draft so a discount that
-	# ERPNext rejects (e.g. larger than the computed total) can never fail the order.
-	skipped_coupons = _apply_coupon(sales_order, payload, settings, correlation_id)
+	# Wave owns coupons: apply an existing ERP coupon but never create one, and flag
+	# every couponed order so the team verifies it.
+	coupon_reviews = _review_coupons(sales_order, payload, settings)
 
 	if skipped_items:
 		_annotate_sales_order_for_skipped_items(
@@ -83,22 +83,22 @@ def handle(payload: dict, correlation_id: str) -> None:
 		_annotate_sales_order_for_skipped_tax(
 			sales_order.name, payload, correlation_id, skipped_tax
 		)
-	if skipped_coupons:
-		_annotate_sales_order_for_skipped_coupons(
-			sales_order.name, payload, correlation_id, skipped_coupons
+	if coupon_reviews:
+		_annotate_coupons_for_review(
+			sales_order.name, payload, correlation_id, coupon_reviews
 		)
 
 	# Fire one ToDo for the team when any soft-fail flagged the SO for review.
-	if skipped_items or skipped_fees or skipped_tax or skipped_coupons:
+	if skipped_items or skipped_fees or skipped_tax or coupon_reviews:
 		intake_review_notifier.notify_sales_order_needs_review(
 			sales_order, settings,
-			_summarise_intake_issues(skipped_items, skipped_fees, skipped_tax, skipped_coupons),
+			_summarise_intake_issues(skipped_items, skipped_fees, skipped_tax, coupon_reviews),
 		)
 
 	_log_sales_order_created(correlation_id, payload, sales_order.name)
 
 
-def _summarise_intake_issues(skipped_items, skipped_fees, skipped_tax, skipped_coupons=None) -> str:
+def _summarise_intake_issues(skipped_items, skipped_fees, skipped_tax, coupon_reviews=None) -> str:
 	"""Build a short comma-separated summary for the ToDo description."""
 	parts = []
 	if skipped_items:
@@ -107,8 +107,8 @@ def _summarise_intake_issues(skipped_items, skipped_fees, skipped_tax, skipped_c
 		parts.append(f"{len(skipped_fees)} unmapped fee(s)")
 	if skipped_tax:
 		parts.append("tax template issue")
-	if skipped_coupons:
-		parts.append(f"{len(skipped_coupons)} unapplied coupon(s)")
+	if coupon_reviews:
+		parts.append(f"{len(coupon_reviews)} coupon(s) to review")
 	return ", ".join(parts) or "intake issue"
 
 
@@ -463,64 +463,96 @@ def _build_fee_line(item_code: str, fee_type: str, amount_major: float, sales_or
 	return line
 
 
-def _apply_coupon(sales_order, payload: dict, settings, correlation_id: str) -> list[dict]:
-	"""Mirror a valid Wave COUPON onto the persisted SO via its native coupon_code.
+def _review_coupons(sales_order, payload: dict, settings) -> list[dict]:
+	"""Apply an existing ERP coupon to the order and always flag it for team review.
 
-	Gated by Wave Settings.coupon_sync_enabled. Only a valid (isValid) coupon with a
-	positive amount is applied, one per order. The Sales Order is already inserted, so
-	we set coupon_code + re-save inside a savepoint: a coupon larger than the computed
-	grand_total, or one that cannot be resolved/applied, is rolled back and collected
-	(non-fatal) — the order itself is never lost. Returns skipped details for the caller.
+	Gated by Wave Settings.coupon_sync_enabled. For each coupon on the order we look
+	up (never create) a matching ERP Coupon Code; if found, we apply it to the SO's
+	native coupon_code (the first that applies — there is only one slot) so its
+	discount takes effect. A coupon not present in ERP is alarmed only. Either way an
+	entry is returned so the caller flags the SO + fires the review ToDo. Empty when
+	the alarm is off or the order carries no coupon.
 	"""
 	if not settings.get("coupon_sync_enabled"):
 		return []
-	coupon = _extract_valid_coupon(payload)
-	if not coupon:
-		return []
 	divisor = int(settings.price_scale_divisor or 100)
-	code = (coupon.get("value") or "").strip()
-	amount_major = cents_to_major(coupon.get("amount"), divisor)
-	grand_total = float(sales_order.grand_total or 0)
-	if grand_total and amount_major > grand_total:
-		return [{"code": code, "amount_major": amount_major,
-			"error": f"coupon amount {amount_major} exceeds order total {grand_total}"}]
+	reviews = []
+	for option in _extract_coupons(payload):
+		code = (option.get("value") or "").strip()
+		existing = find_coupon_code(code)
+		entry = {
+			"code": code,
+			"amount_major": cents_to_major(option.get("amount"), divisor),
+			"found": bool(existing),
+			"applied": False,
+			"error": None,
+		}
+		# One native coupon_code slot: apply the first found coupon that ERPNext accepts.
+		if existing and not sales_order.get("coupon_code"):
+			entry["applied"], entry["error"] = _apply_existing_coupon(sales_order, existing)
+		reviews.append(entry)
+	return reviews
+
+
+def _apply_existing_coupon(sales_order, coupon_name: str) -> tuple[bool, str | None]:
+	"""Set the SO's native coupon_code to an EXISTING coupon and re-save inside a savepoint.
+
+	Never creates a coupon. A discount ERPNext rejects (e.g. larger than the order
+	total) is rolled back and reported, so the order itself is never lost. Returns
+	(applied, error).
+	"""
 	frappe.db.savepoint("wave_coupon")
 	try:
-		sales_order.coupon_code = resolve_coupon(code, amount_major, settings, correlation_id)
+		sales_order.coupon_code = coupon_name
 		sales_order.save(ignore_permissions=True)
-		return []
+		return True, None
 	except Exception as exc:
 		frappe.db.rollback(save_point="wave_coupon")
-		return [{"code": code, "amount_major": amount_major, "error": str(exc)}]
+		sales_order.coupon_code = None
+		return False, str(exc)
 
 
-def _extract_valid_coupon(payload: dict) -> dict | None:
-	"""Return the single valid COUPON payment option (isValid + positive amount), or None."""
-	for option in payload.get("paymentOptions") or []:
-		if (option.get("type") or "").strip().upper() != "COUPON":
-			continue
-		if option.get("isValid") and option.get("amount"):
-			return option
-	return None
+def _extract_coupons(payload: dict) -> list[dict]:
+	"""Return every COUPON payment option that carries a code (validity/amount NOT filtered)."""
+	return [
+		option
+		for option in payload.get("paymentOptions") or []
+		if (option.get("type") or "").strip().upper() == "COUPON"
+		and (option.get("value") or "").strip()
+	]
 
 
-def _annotate_sales_order_for_skipped_coupons(
-	sales_order_name: str, payload: dict, correlation_id: str, skipped: list[dict]
+def _annotate_coupons_for_review(
+	sales_order_name: str, payload: dict, correlation_id: str, reviews: list[dict]
 ) -> None:
-	"""Flag the SO for manual review and record each coupon that could not be applied."""
+	"""Flag the SO for review and record each coupon — found ones to confirm, missing ones to add."""
 	_flag_manual_review(sales_order_name)
-	for entry in skipped:
+	lines = []
+	for entry in reviews:
+		message = _coupon_review_message(entry)
 		log_step(
 			correlation_id, "Action Required", "Warning",
 			doc_type="ORDER", action="CREATE",
 			wave_id=payload.get("_id"), wave_updated_at=payload.get("updatedAt"),
 			linked_doctype="Sales Order", linked_docname=sales_order_name,
-			error_message=f"Coupon {entry['code']!r} not applied: {entry['error']}",
+			error_message=message,
 		)
-	lines = "".join(f"<li>{escape_html(e['code'])}: {escape_html(e['error'])}</li>" for e in skipped)
+		lines.append(f"<li>{escape_html(message)}</li>")
 	frappe.get_doc("Sales Order", sales_order_name).add_comment(
-		"Comment", f"Wave coupon(s) not applied — review required:<ul>{lines}</ul>"
+		"Comment", f"Wave coupon(s) need review:<ul>{''.join(lines)}</ul>"
 	)
+
+
+def _coupon_review_message(entry: dict) -> str:
+	"""Human message for one coupon: applied / could-not-apply / missing-in-ERP — always review."""
+	head = f"Coupon {entry['code']!r} (amount {entry['amount_major']})"
+	if not entry["found"]:
+		return f"{head} is on the Wave order but no matching ERP Coupon Code exists — add it or correct the order."
+	if entry["applied"]:
+		return f"{head} found in ERP and applied to this order — confirm it is correct."
+	if entry["error"]:
+		return f"{head} exists in ERP but could not be applied ({entry['error']}) — review."
+	return f"{head} exists in ERP but was not applied (another coupon is already on this order) — review."
 
 
 def _fee_line_item_tax_template(settings, fee_type: str) -> str:
