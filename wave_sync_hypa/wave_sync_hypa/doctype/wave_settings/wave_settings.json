@@ -416,7 +416,7 @@
   },
   {
    "default": "0",
-   "description": "When on, any inbound Wave order carrying a coupon raises a review alarm (ToDo + Sales Order review flag) so the team verifies the coupon. ERP coupons are never created or applied from Wave. Off => coupons in the payload are ignored.",
+   "description": "When on, any inbound Wave order carrying a coupon raises a review alarm (ToDo + Sales Order review flag); an existing matching ERP coupon is applied to the order, and a coupon not present in ERP is flagged only. ERP coupons are never created or updated from Wave. Off => coupons in the payload are ignored.",
    "fieldname": "coupon_sync_enabled",
    "fieldtype": "Check",
    "label": "Coupon Review Alarm Enabled"
