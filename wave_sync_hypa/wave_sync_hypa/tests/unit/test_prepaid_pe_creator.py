@@ -329,6 +329,7 @@ class TestAttachAndSubmit(FrappeTestCase):
 	def test_submitted_pe_already_referencing_si_is_idempotent(self):
 		with (
 			patch.object(frappe.db, "get_value", return_value=_si_row()),
+			patch.object(frappe.db, "set_value") as mock_set,
 			patch.object(pe_creator, "_prepaid_sources", return_value=_source()),
 			patch.object(pe_creator, "_find_pe_for_order", return_value=("ACC-PAY-SUB", 1)),
 			patch.object(pe_creator, "_pe_references_si", return_value=True),
@@ -338,6 +339,8 @@ class TestAttachAndSubmit(FrappeTestCase):
 			res = pe_creator.attach_and_submit_for_si(SI, "c", settings=_settings())
 		self.assertTrue(res["ok"])
 		mock_flag.assert_not_called()
+		# Stamps the already-settling PE onto the SI so the button hides.
+		mock_set.assert_any_call("Sales Invoice", SI, "wave_payment_entry", "ACC-PAY-SUB", update_modified=False)
 		self.assertIn(pe_creator.STEP_ALREADY_SETTLED, [c.kwargs.get("step") for c in mock_log.call_args_list])
 
 	def test_submitted_pe_conflict_raises_full_alarm(self):

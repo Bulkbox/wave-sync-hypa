@@ -54,6 +54,7 @@ from .test_picker_identifier import *  # noqa: F401, F403
 from .test_prepaid_pe_creator import *  # noqa: F401, F403
 from .test_prepaid_pe_handlers import *  # noqa: F401, F403
 from .test_product_resolver import *  # noqa: F401, F403
+from .test_sales_invoice_api import *  # noqa: F401, F403
 from .test_sales_invoice_status_push import *  # noqa: F401, F403
 from .test_sales_order_amend import *  # noqa: F401, F403
 from .test_sales_order_auto_push import *  # noqa: F401, F403

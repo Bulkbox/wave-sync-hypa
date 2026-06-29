@@ -324,6 +324,8 @@ def _settle_under_lock(si_name, si, src, settings, correlation_id, txn) -> dict:
 		if docstatus == 0:
 			return _update_and_submit_draft(name, si_name, si, src, settings, correlation_id, txn)
 		if _pe_references_si(name, si_name):
+			# Stamp the settling PE (e.g. an n8n one) so the SI button hides too.
+			frappe.db.set_value("Sales Invoice", si_name, "wave_payment_entry", name, update_modified=False)
 			log_step(
 				correlation_id=correlation_id, step=STEP_ALREADY_SETTLED, level="Info",
 				doc_type="Sales Invoice", linked_doctype="Sales Invoice", linked_docname=si_name,
