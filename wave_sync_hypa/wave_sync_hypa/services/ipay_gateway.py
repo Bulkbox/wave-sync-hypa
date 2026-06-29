@@ -43,7 +43,18 @@ def fetch_transaction(oid: str) -> dict:
 		return {"available": False, "paid": False, "data": None, "error": "iPay app is not installed"}
 	try:
 		from ipay.api import get_transaction
+	except ImportError:
+		# The iPay app is installed but predates its get_transaction API
+		# (ipay.api, added 2026-06-02). Surface an actionable message instead of
+		# the raw "No module named 'ipay.api'" so ops know to update the iPay app.
+		return {
+			"available": True,
+			"paid": False,
+			"data": None,
+			"error": "iPay app is installed but missing the get_transaction API (ipay.api); update the iPay app on this site.",
+		}
 
+	try:
 		result = get_transaction(oid) or {}
 		return {
 			"available": True,
