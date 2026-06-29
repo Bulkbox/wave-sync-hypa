@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import frappe
 
+from wave_sync_hypa.wave_sync_hypa.services import payment_mapping
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.payment_status_resolver import FULL_PAYMENT_TOLERANCE
@@ -263,11 +264,7 @@ def _expected_mop_for_payment_type(payment_type: str) -> str | None:
 	"""Look up the mapping row for paymentType and return its mode_of_payment, or None."""
 	if not payment_type:
 		return None
-	settings = frappe.get_cached_doc("Wave Settings")
-	for row in settings.get("payment_method_mappings") or []:
-		if (row.get("wave_payment_type") or "").strip() == payment_type:
-			return (row.get("mode_of_payment") or "").strip() or None
-	return None
+	return payment_mapping.mode_of_payment_for(frappe.get_cached_doc("Wave Settings"), payment_type)
 
 
 def _classify_mode_of_payment(mop: str) -> str | None:

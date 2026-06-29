@@ -51,6 +51,7 @@ from .test_pick_list_batch_pusher import *  # noqa: F401, F403
 from .test_pick_list_status_push import *  # noqa: F401, F403
 from .test_pick_list_submit_gate import *  # noqa: F401, F403
 from .test_picker_identifier import *  # noqa: F401, F403
+from .test_prepaid_pe_creator import *  # noqa: F401, F403
 from .test_product_resolver import *  # noqa: F401, F403
 from .test_sales_invoice_status_push import *  # noqa: F401, F403
 from .test_sales_order_amend import *  # noqa: F401, F403
