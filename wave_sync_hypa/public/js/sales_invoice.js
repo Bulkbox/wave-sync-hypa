@@ -10,6 +10,9 @@
 frappe.ui.form.on("Sales Invoice", {
 	refresh(frm) {
 		if (frm.doc.wave_payment_classification !== "prepaid") return;
+		if (frm.doc.wave_payment_review_required) {
+			_render_payment_review_banner(frm);
+		}
 		// Only change the form once the feature is actually enabled. While it is
 		// off (the default), leave iPay's own buttons intact — removing them and
 		// showing a Wave button that only reports "disabled" would be a regression.
@@ -36,6 +39,21 @@ function _suppress_ipay_buttons(frm) {
 	};
 	drop();
 	setTimeout(drop, 0);
+}
+
+// Red banner when the prepaid invoice's Payment Entry could not be auto-created
+// / submitted (amount mismatch, unverified payment, or a conflict). The reason
+// is carried on the doc; the operator resolves it via the Wave Payment Entry
+// button (or by reconciling manually).
+function _render_payment_review_banner(frm) {
+	const reason = frm.doc.wave_payment_review_reason || __("the Payment Entry could not be created");
+	frm.set_intro(
+		__(
+			"Wave Sync — payment review required. {0} Use 'Wave Payment Entry' above to create / confirm it, then reconcile.",
+			[frappe.utils.escape_html(reason)]
+		),
+		"red"
+	);
 }
 
 function _add_wave_payment_entry_button(frm) {

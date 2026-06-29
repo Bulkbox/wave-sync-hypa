@@ -836,6 +836,36 @@
   "translatable": 0
  },
  {
+  "default": "0",
+  "description": "Set when this prepaid invoice's iPay Payment Entry could not be auto-created/submitted (amount mismatch, unverified payment, or a conflict). The accounting team follows up via the Wave Payment Entry button; cleared automatically once the Payment Entry submits.",
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "wave_payment_review_required",
+  "fieldtype": "Check",
+  "in_standard_filter": 1,
+  "insert_after": "wave_payment_entry",
+  "label": "Payment Review Required",
+  "modified": "2026-06-29 00:00:00",
+  "name": "Sales Invoice-wave_payment_review_required",
+  "no_copy": 1,
+  "read_only": 1,
+  "translatable": 0
+ },
+ {
+  "description": "Why this invoice is flagged for payment review (e.g. the invoice total does not match the iPay-authorised amount, or no verified payment was found).",
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "wave_payment_review_reason",
+  "fieldtype": "Small Text",
+  "insert_after": "wave_payment_review_required",
+  "label": "Payment Review Reason",
+  "modified": "2026-06-29 00:00:00",
+  "name": "Sales Invoice-wave_payment_review_reason",
+  "no_copy": 1,
+  "read_only": 1,
+  "translatable": 0
+ },
+ {
   "doctype": "Custom Field",
   "dt": "Payment Entry",
   "fieldname": "wave_order_id",

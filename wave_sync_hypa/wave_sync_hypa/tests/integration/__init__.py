@@ -25,6 +25,7 @@ from .test_log_retention import *  # noqa: F401, F403
 from .test_logger import *  # noqa: F401, F403
 from .test_master_switch import *  # noqa: F401, F403
 from .test_order_create import *  # noqa: F401, F403
+from .test_prepaid_pe_lifecycle import *  # noqa: F401, F403
 from .test_order_update_pick_list_collected import *  # noqa: F401, F403
 from .test_processor import *  # noqa: F401, F403
 from .test_sales_order_api import *  # noqa: F401, F403
