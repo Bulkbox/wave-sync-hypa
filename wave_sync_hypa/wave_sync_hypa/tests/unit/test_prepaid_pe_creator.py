@@ -428,6 +428,21 @@ class TestButtonEntry(FrappeTestCase):
 		mock_core.assert_called_once()
 
 
+class TestEnqueueGuard(FrappeTestCase):
+	"""A queue-backend failure must never propagate out of the submit hot path."""
+
+	def test_enqueue_failure_is_swallowed_and_logged(self):
+		with (
+			patch.object(frappe, "enqueue", side_effect=RuntimeError("redis down")),
+			patch.object(pe_creator, "log_step") as mock_log,
+		):
+			pe_creator.enqueue_draft_for_order(SO, "c")  # must not raise
+			pe_creator.enqueue_attach_for_si(SI, "c")    # must not raise
+		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
+		self.assertEqual(steps.count(pe_creator.STEP_ENQUEUE_FAILED), 2)
+		self.assertNotIn(pe_creator.STEP_DRAFT_ENQUEUED, steps)
+
+
 class TestWorkerGates(FrappeTestCase):
 	"""Both workers backstop the master switch + the auto-create flag, and swallow exceptions."""
 

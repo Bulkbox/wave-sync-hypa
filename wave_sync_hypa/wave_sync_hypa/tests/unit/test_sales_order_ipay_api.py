@@ -17,14 +17,21 @@ from wave_sync_hypa.wave_sync_hypa.api import sales_order as so_api
 SO = "SAL-ORD-2026-00105"
 
 
-def _doc(classification="prepaid"):
-	doc = SimpleNamespace(doctype="Sales Order", name=SO)
+def _doc(classification="prepaid", docstatus=1):
+	doc = SimpleNamespace(doctype="Sales Order", name=SO, docstatus=docstatus)
 	doc.check_permission = lambda perm: None
 	doc.get = lambda key, default=None: {"wave_payment_classification": classification}.get(key, default)
 	return doc
 
 
 class TestVerifyIpayPayment(FrappeTestCase):
+	def setUp(self):
+		# Pre-dates the prepaid-PE draft chain; neutralise its enqueue so these
+		# tests don't load real Wave Settings.
+		p = patch.object(so_api.prepaid_pe, "maybe_enqueue_draft_for_order")
+		p.start()
+		self.addCleanup(p.stop)
+
 	def test_returns_ok_false_when_not_prepaid(self):
 		with (
 			patch.object(frappe, "get_doc", return_value=_doc(classification="cod")),

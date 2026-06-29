@@ -71,14 +71,21 @@ class TestStampWaveOrderId(FrappeTestCase):
 	def test_resolves_via_sales_order_link(self):
 		"""SI made from SO directly: items[].sales_order -> SO.wave_order_id."""
 		doc = _si(items=[_item(sales_order="SO-001")])
+
+		def _gv(*args, **kwargs):
+			# item-walk uses a positional wave_order_id field; the source lookup a field list.
+			if args[2] == "wave_order_id":
+				return WAVE_ID_A
+			return frappe._dict()
+
 		with (
-			patch.object(frappe.db, "get_value", return_value=WAVE_ID_A) as mock_get,
+			patch.object(frappe.db, "get_value", side_effect=_gv) as mock_get,
 			patch.object(si_handler, "log_step") as mock_log,
 		):
 			si_handler.stamp_wave_order_id(doc)
 
 		self.assertEqual(doc.wave_order_id, WAVE_ID_A)
-		# First call must be the item-walk lookup; subsequent calls (e.g. wave_friendly_id) are fine.
+		# First call must be the item-walk lookup; subsequent calls (the source read) are fine.
 		self.assertEqual(mock_get.call_args_list[0].args, ("Sales Order", "SO-001", "wave_order_id"))
 		mock_log.assert_not_called()
 
@@ -106,9 +113,10 @@ class TestStampWaveOrderId(FrappeTestCase):
 		def _gv(*args, **kwargs):
 			if args[2] == "wave_order_id":
 				return WAVE_ID_A
-			if args[2] == "wave_friendly_id":
-				return "10000099" if isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A else None
-			return None
+			# The source lookup reads a field list ([wave_friendly_id, classification]) as_dict.
+			if isinstance(args[2], (list, tuple)) and isinstance(args[1], dict) and args[1].get("wave_order_id") == WAVE_ID_A:
+				return frappe._dict(wave_friendly_id="10000099", wave_payment_classification="prepaid")
+			return frappe._dict()
 
 		with (
 			patch.object(frappe.db, "get_value", side_effect=_gv),
@@ -162,6 +170,13 @@ class TestStampWaveOrderId(FrappeTestCase):
 
 class TestOnSalesInvoiceSubmit(FrappeTestCase):
 	"""submit hook: dispatch fan-out for regular invoices, explicit skip for returns."""
+
+	def setUp(self):
+		# These pre-date the prepaid-PE feature and aren't about it; neutralise the
+		# new attach-enqueue branch so they don't load real Wave Settings.
+		p = patch.object(si_handler.prepaid_pe, "maybe_enqueue_attach_for_si")
+		p.start()
+		self.addCleanup(p.stop)
 
 	def test_dispatches_with_distinct_wave_order_ids(self):
 		"""Two items reaching two distinct Wave SOs -> dispatcher receives both ids."""

@@ -59,6 +59,7 @@ _PE_CONFLICT_MARKER = "Wave Sync — iPay transaction conflict"
 
 STEP_DRAFT_ENQUEUED = "prepaid_pe_draft_enqueued"
 STEP_ATTACH_ENQUEUED = "prepaid_pe_attach_enqueued"
+STEP_ENQUEUE_FAILED = "prepaid_pe_enqueue_failed"
 STEP_SKIPPED_NOT_PREPAID = "prepaid_pe_skipped_not_prepaid"
 STEP_MULTI_SOURCE = "prepaid_pe_multi_source_flagged"
 STEP_NO_TXN_CODE = "prepaid_pe_no_transaction_code"
@@ -89,17 +90,30 @@ def _result(ok, *, created=False, payment_entry=None, docstatus=None, reason=Non
 # --------------------------------------------------------------------------- #
 def enqueue_draft_for_order(sales_order: str, correlation_id: str) -> None:
 	"""Queue the unallocated-draft creation for a confirmed prepaid SO (after_commit)."""
-	frappe.enqueue(
-		DRAFT_WORKER_DOTTED_PATH,
-		queue="default",
-		enqueue_after_commit=True,
-		job_name=f"prepaid_pe_draft:{sales_order}",
-		sales_order=sales_order,
-		correlation_id=correlation_id,
+	_enqueue(
+		DRAFT_WORKER_DOTTED_PATH, job_name=f"prepaid_pe_draft:{sales_order}",
+		enqueued_step=STEP_DRAFT_ENQUEUED, doctype="Sales Order", docname=sales_order,
+		correlation_id=correlation_id, sales_order=sales_order,
 	)
+
+
+def _enqueue(worker_path, *, job_name, enqueued_step, doctype, docname, correlation_id, **job_kwargs) -> None:
+	"""Enqueue a worker after_commit; a queue-backend failure must never abort the caller's submit."""
+	try:
+		frappe.enqueue(
+			worker_path, queue="default", enqueue_after_commit=True,
+			job_name=job_name, correlation_id=correlation_id, **job_kwargs,
+		)
+	except Exception as exc:
+		log_step(
+			correlation_id=correlation_id, step=STEP_ENQUEUE_FAILED, level="Error",
+			doc_type=doctype, linked_doctype=doctype, linked_docname=docname,
+			error_message=f"could not enqueue {worker_path}: {exc}", stack_trace=frappe.get_traceback(),
+		)
+		return
 	log_step(
-		correlation_id=correlation_id, step=STEP_DRAFT_ENQUEUED, level="Info",
-		doc_type="Sales Order", linked_doctype="Sales Order", linked_docname=sales_order,
+		correlation_id=correlation_id, step=enqueued_step, level="Info",
+		doc_type=doctype, linked_doctype=doctype, linked_docname=docname,
 	)
 
 
@@ -224,17 +238,10 @@ def _build_unallocated_draft(so_name, so, txn, settings, correlation_id) -> None
 # --------------------------------------------------------------------------- #
 def enqueue_attach_for_si(sales_invoice: str, correlation_id: str) -> None:
 	"""Queue the attach-and-submit for a submitted prepaid SI (after_commit)."""
-	frappe.enqueue(
-		ATTACH_WORKER_DOTTED_PATH,
-		queue="default",
-		enqueue_after_commit=True,
-		job_name=f"prepaid_pe_attach:{sales_invoice}",
-		sales_invoice=sales_invoice,
-		correlation_id=correlation_id,
-	)
-	log_step(
-		correlation_id=correlation_id, step=STEP_ATTACH_ENQUEUED, level="Info",
-		doc_type="Sales Invoice", linked_doctype="Sales Invoice", linked_docname=sales_invoice,
+	_enqueue(
+		ATTACH_WORKER_DOTTED_PATH, job_name=f"prepaid_pe_attach:{sales_invoice}",
+		enqueued_step=STEP_ATTACH_ENQUEUED, doctype="Sales Invoice", docname=sales_invoice,
+		correlation_id=correlation_id, sales_invoice=sales_invoice,
 	)
 
 

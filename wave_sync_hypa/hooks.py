@@ -158,6 +158,7 @@ doc_events = {
 		"on_submit": [
 			"wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_submit",
 			"wave_sync_hypa.wave_sync_hypa.handlers.order_status.maybe_auto_push_to_wave",
+			"wave_sync_hypa.wave_sync_hypa.handlers.prepaid_pe.enqueue_draft_on_so_submit",
 		],
 		"on_cancel": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_cancel",
 	},

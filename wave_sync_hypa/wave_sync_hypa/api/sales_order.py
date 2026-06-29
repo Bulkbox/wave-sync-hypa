@@ -7,6 +7,7 @@ concern and the operator UI endpoints have their own home.
 import frappe
 from frappe import _
 
+from wave_sync_hypa.wave_sync_hypa.handlers import prepaid_pe
 from wave_sync_hypa.wave_sync_hypa.services import ipay_payment_sync, wave_order_creator
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 
@@ -71,6 +72,11 @@ def verify_ipay_payment(sales_order: str) -> dict:
 			"correlation_id": correlation_id,
 		}
 	result = ipay_payment_sync.fetch_and_stamp(sales_order, correlation_id)
+	# A successful verify on a confirmed (submitted) prepaid order is the trigger
+	# to create the unallocated draft Payment Entry (gated; the worker no-ops if
+	# the feature is off or the order is still a draft).
+	if result.get("paid") and doc.docstatus == 1:
+		prepaid_pe.maybe_enqueue_draft_for_order(sales_order)
 	result["correlation_id"] = correlation_id
 	frappe.db.commit()
 	return result
