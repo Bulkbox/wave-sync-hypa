@@ -12,12 +12,10 @@ db reads, the filelock, and the alarm helpers are patched at the module boundary
 from __future__ import annotations
 
 import contextlib
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import nowdate
 from frappe.utils.file_lock import LockTimeoutError
 
 from wave_sync_hypa.wave_sync_hypa.services import prepaid_pe_creator as pe_creator
@@ -148,6 +146,44 @@ class TestEnsureDraft(FrappeTestCase):
 			pe_creator.ensure_draft_pe_for_order(SO, "c", settings=_settings())
 		mock_new.assert_not_called()
 		self.assertIn(pe_creator.STEP_NO_MOP_ACCOUNT, [c.kwargs.get("step") for c in mock_log.call_args_list])
+
+	def test_no_authorised_amount_defers(self):
+		with (
+			patch.object(frappe.db, "get_value", return_value=_so_row(hold=0.0, additional=0.0, txn_amount=0.0)),
+			patch.object(pe_creator, "_find_pe_for_order", return_value=None),
+			patch.object(pe_creator.payment_mapping, "mode_of_payment_for", return_value="MPESA"),
+			patch.object(pe_creator, "_bank_account_for", return_value="Cash - X"),
+			patch.object(frappe, "new_doc") as mock_new,
+			patch.object(pe_creator, "log_step") as mock_log,
+		):
+			pe_creator.ensure_draft_pe_for_order(SO, "c", settings=_settings())
+		mock_new.assert_not_called()
+		self.assertIn(pe_creator.STEP_NO_AMOUNT, [c.kwargs.get("step") for c in mock_log.call_args_list])
+
+	def test_build_failure_is_flagged_not_raised(self):
+		fake_pe = MagicMock(name="PE")
+		fake_pe.name = "ACC-PAY-X"
+		fake_pe.insert.side_effect = RuntimeError("boom")
+		with (
+			patch.object(frappe.db, "get_value", return_value=_so_row()),
+			patch.object(pe_creator, "_find_pe_for_order", return_value=None),
+			patch.object(frappe, "new_doc", return_value=fake_pe),
+			patch.object(pe_creator.payment_mapping, "mode_of_payment_for", return_value="MPESA"),
+			patch.object(pe_creator, "_bank_account_for", return_value="Cash - X"),
+			patch.object(frappe.db, "commit"),
+			patch.object(pe_creator, "log_step") as mock_log,
+		):
+			pe_creator.ensure_draft_pe_for_order(SO, "c", settings=_settings())  # must not raise
+		self.assertIn(pe_creator.STEP_DRAFT_BUILD_FAILED, [c.kwargs.get("step") for c in mock_log.call_args_list])
+
+	def test_lock_timeout_defers(self):
+		with (
+			patch.object(frappe.db, "get_value", return_value=_so_row()),
+			patch.object(pe_creator, "filelock", side_effect=LockTimeoutError("busy")),
+			patch.object(pe_creator, "log_step") as mock_log,
+		):
+			pe_creator.ensure_draft_pe_for_order(SO, "c", settings=_settings())
+		self.assertIn(pe_creator.STEP_LOCK_TIMEOUT, [c.kwargs.get("step") for c in mock_log.call_args_list])
 
 
 class TestAttachAndSubmit(FrappeTestCase):
@@ -307,6 +343,27 @@ class TestAttachAndSubmit(FrappeTestCase):
 		draft.submit.assert_called_once()
 		self.assertIn(pe_creator.STEP_UPDATED_DRAFT, [c.kwargs.get("step") for c in mock_log.call_args_list])
 
+	def test_attach_sets_payment_term_for_single_term_invoice(self):
+		"""Payment-term-based invoices need a term on the reference row (Wave SIs carry one)."""
+		draft = MagicMock(name="DraftPE")
+		draft.name = "ACC-PAY-DRAFT"
+		draft.references = []
+		with (
+			patch.object(frappe.db, "get_value", return_value=_si_row(grand_total=260.0)),
+			patch.object(frappe.db, "set_value"),
+			patch.object(pe_creator, "_prepaid_sources", return_value=_source(hold=260.0)),
+			patch.object(pe_creator, "_find_pe_for_order", return_value=("ACC-PAY-DRAFT", 0)),
+			patch.object(frappe, "get_doc", return_value=draft),
+			patch.object(pe_creator, "_other_live_pes_for_order", return_value=[]),
+			patch.object(pe_creator, "_si_single_payment_term", return_value="Cash on Delivery"),
+			patch.object(pe_creator.payment_review_flag, "clear"),
+			patch.object(pe_creator, "log_step"),
+		):
+			pe_creator.attach_and_submit_for_si(SI, "c", settings=_settings())
+		row = draft.append.call_args.args[1]
+		self.assertEqual(row["reference_doctype"], "Sales Invoice")
+		self.assertEqual(row["payment_term"], "Cash on Delivery")
+
 	def test_attach_draft_detects_concurrent_duplicate(self):
 		"""A second live PE for the order during draft-attach -> alarm, never submit."""
 		draft = MagicMock(name="DraftPE")
@@ -325,6 +382,41 @@ class TestAttachAndSubmit(FrappeTestCase):
 		self.assertFalse(res["ok"])
 		draft.submit.assert_not_called()
 		mock_alarm.assert_called_once()
+
+	def test_concurrent_SUBMITTED_other_routes_to_conflict_not_duplicate(self):
+		"""When the racing 'other' PE is already submitted, alarm as a conflict (never 'neither submitted')."""
+		fake_pe = MagicMock(name="PE")
+		fake_pe.name = "ACC-PAY-OURS"
+		with (
+			patch.object(frappe.db, "get_value", side_effect=lambda dt, *a, **k: 1 if dt == "Payment Entry" else _si_row()),
+			patch.object(pe_creator, "_prepaid_sources", return_value=_source()),
+			patch.object(pe_creator, "_find_pe_for_order", return_value=None),
+			patch.object(pe_creator, "_other_live_pes_for_order", return_value=["ACC-PAY-N8N-SUBMITTED"]),
+			patch.object(pe_creator, "get_payment_entry", return_value=fake_pe),
+			patch.object(pe_creator, "_raise_submitted_conflict_alarm") as mock_conflict,
+			patch.object(pe_creator, "_raise_duplicate_alarm") as mock_dup,
+			patch.object(pe_creator, "log_step"),
+		):
+			res = pe_creator.attach_and_submit_for_si(SI, "c", settings=_settings())
+		self.assertFalse(res["ok"])
+		fake_pe.submit.assert_not_called()
+		mock_conflict.assert_called_once()
+		mock_dup.assert_not_called()
+
+	def test_no_transaction_code_flags_si(self):
+		no_txn = [{"so": SO, "transaction_code": "", "paid_at": None, "payment_type": "card",
+			"wave_payment_hold": 0, "wave_additional_payment_hold": 0, "wave_order_id": WOID, "wave_friendly_id": FID}]
+		with (
+			patch.object(frappe.db, "get_value", side_effect=[_si_row(), ""]),
+			patch.object(pe_creator, "_prepaid_sources", return_value=no_txn),
+			patch.object(pe_creator.ipay_payment_sync, "fetch_and_stamp"),
+			patch.object(pe_creator.payment_review_flag, "flag") as mock_flag,
+			patch.object(pe_creator, "log_step") as mock_log,
+		):
+			res = pe_creator.attach_and_submit_for_si(SI, "c", settings=_settings())
+		self.assertFalse(res["ok"])
+		mock_flag.assert_called_once()
+		self.assertIn(pe_creator.STEP_NO_TXN_CODE, [c.kwargs.get("step") for c in mock_log.call_args_list])
 
 	def test_submitted_pe_already_referencing_si_is_idempotent(self):
 		with (
@@ -471,6 +563,14 @@ class TestWorkerGates(FrappeTestCase):
 			patch.object(pe_creator, "attach_and_submit_for_si") as mock_core,
 		):
 			pe_creator.attach_and_submit_worker(sales_invoice=SI, correlation_id="c")
+		mock_core.assert_called_once()
+
+	def test_draft_worker_calls_core_when_enabled(self):
+		with (
+			patch.object(pe_creator, "_enabled_settings", return_value=_settings(auto=1)),
+			patch.object(pe_creator, "ensure_draft_pe_for_order") as mock_core,
+		):
+			pe_creator.ensure_draft_pe_worker(sales_order=SO, correlation_id="c")
 		mock_core.assert_called_once()
 
 	def test_worker_swallows_unexpected_error(self):

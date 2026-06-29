@@ -13,18 +13,19 @@ frappe.ui.form.on("Sales Invoice", {
 		if (frm.doc.wave_payment_review_required) {
 			_render_payment_review_banner(frm);
 		}
-		// Only change the form once the feature is actually enabled. While it is
-		// off (the default), leave iPay's own buttons intact — removing them and
+		// Only change the form when the integration is live AND the feature is on.
+		// While either is off, leave iPay's own buttons intact — removing them and
 		// showing a Wave button that only reports "disabled" would be a regression.
-		frappe.db
-			.get_single_value("Wave Settings", "ipay_auto_create_payment_entry")
-			.then((enabled) => {
-				if (!parseInt(enabled || 0)) return;
-				_suppress_ipay_buttons(frm);
-				if (frm.doc.docstatus === 1 && !frm.doc.wave_payment_entry) {
-					_add_wave_payment_entry_button(frm);
-				}
-			});
+		Promise.all([
+			frappe.db.get_single_value("Wave Settings", "enabled"),
+			frappe.db.get_single_value("Wave Settings", "ipay_auto_create_payment_entry"),
+		]).then(([enabled, auto]) => {
+			if (!parseInt(enabled || 0) || !parseInt(auto || 0)) return;
+			_suppress_ipay_buttons(frm);
+			if (frm.doc.docstatus === 1 && !frm.doc.wave_payment_entry) {
+				_add_wave_payment_entry_button(frm);
+			}
+		});
 	},
 });
 

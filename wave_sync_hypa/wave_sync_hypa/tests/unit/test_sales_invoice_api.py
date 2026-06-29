@@ -24,16 +24,19 @@ def _doc(classification="prepaid"):
 
 
 class TestEnsurePaymentEntry(FrappeTestCase):
-	def test_not_prepaid_returns_ok_false_without_calling_engine(self):
+	def test_not_prepaid_returns_engine_refusal(self):
+		# The endpoint no longer pre-checks classification; the engine decides
+		# authoritatively (from the source SO) and returns the not-prepaid refusal.
 		with (
 			patch.object(frappe, "get_doc", return_value=_doc(classification="cod")),
-			patch.object(si_api.prepaid_pe_creator, "find_or_create_for_si") as mock_engine,
+			patch.object(si_api.prepaid_pe_creator, "find_or_create_for_si",
+				return_value={"ok": False, "reason": "Not a prepaid Wave order."}) as mock_engine,
 			patch.object(frappe.db, "commit"),
 		):
 			result = si_api.ensure_payment_entry(SI)
 		self.assertFalse(result["ok"])
 		self.assertIn("correlation_id", result)
-		mock_engine.assert_not_called()
+		mock_engine.assert_called_once()
 
 	def test_prepaid_delegates_and_returns_envelope(self):
 		envelope = {"ok": True, "created": True, "payment_entry": "ACC-PAY-X", "docstatus": 1, "reason": "Payment Entry submitted."}

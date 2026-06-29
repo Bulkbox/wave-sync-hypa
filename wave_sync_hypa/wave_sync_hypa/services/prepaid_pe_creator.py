@@ -166,6 +166,10 @@ def ensure_draft_pe_for_order(so_name: str, correlation_id: str, *, settings=Non
 				)
 				return
 			_build_unallocated_draft(so_name, so, txn, settings, correlation_id)
+			# Commit INSIDE the lock so the next holder sees the inserted draft —
+			# the filelock has no tie to the DB transaction, so releasing it before
+			# committing would leave a double-create window for a concurrent path.
+			frappe.db.commit()
 	except LockTimeoutError:
 		log_step(
 			correlation_id=correlation_id, step=STEP_LOCK_TIMEOUT, level="Info",
@@ -306,7 +310,12 @@ def attach_and_submit_for_si(si_name: str, correlation_id: str, *, settings=None
 
 	try:
 		with filelock(_lock_name(txn), timeout=LOCK_TIMEOUT_SECONDS):
-			return _settle_under_lock(si_name, si, src, settings, correlation_id, txn)
+			result = _settle_under_lock(si_name, si, src, settings, correlation_id, txn)
+			# Commit INSIDE the lock so a concurrent path (a second button click or
+			# the SI-submit worker) sees our committed/submitted PE on its re-check,
+			# closing the double-settle window the OS filelock alone leaves open.
+			frappe.db.commit()
+			return result
 	except LockTimeoutError:
 		_flag(
 			si_name, settings, correlation_id, STEP_LOCK_TIMEOUT,
@@ -352,6 +361,9 @@ def _create_and_submit(si_name, si, src, settings, correlation_id, txn) -> dict:
 			bank = _bank_account_for(mop, pe.company)
 			if bank:
 				pe.paid_to = bank
+				# Drop the cached currency/type so validate() re-derives them for the
+				# new account (else set_exchange_rate would use the stale currency).
+				pe.paid_to_account_currency = pe.paid_to_account_type = pe.paid_to_account_balance = None
 		pe.insert(ignore_permissions=True)
 		log_step(
 			correlation_id=correlation_id, step=STEP_CREATED, level="Info",
@@ -364,11 +376,10 @@ def _create_and_submit(si_name, si, src, settings, correlation_id, txn) -> dict:
 		return _result(False, reason=f"Could not build the Payment Entry: {exc}")
 
 	# A second live PE for this order means an external creator (n8n) raced us
-	# inside our lock window. Never submit a duplicate — alarm, leave both drafts.
+	# inside our lock window. Never submit a duplicate — alarm, leave ours a draft.
 	others = _other_live_pes_for_order(txn, src.get("wave_order_id"), src.get("wave_friendly_id"), exclude=pe.name)
 	if others:
-		_raise_duplicate_alarm(si_name, si, pe.name, others, txn, settings, correlation_id)
-		return _result(False, created=True, payment_entry=pe.name, docstatus=0, reason="A concurrent Payment Entry was detected; reconcile to one.")
+		return _handle_concurrent_others(pe, others, si_name, si, txn, settings, correlation_id, created=True)
 
 	return _submit_if_reconciled(pe, si_name, si, src, settings, correlation_id, txn, created=True)
 
@@ -384,6 +395,9 @@ def _update_and_submit_draft(pe_name, si_name, si, src, settings, correlation_id
 		if si.get("debit_to"):
 			pe.paid_from = si.debit_to
 			pe.party_account = si.debit_to
+			# Drop the cached currency/type so validate() re-derives them for debit_to.
+			pe.paid_from_account_currency = pe.paid_from_account_type = pe.paid_from_account_balance = None
+			pe.party_account_currency = None
 		mop = payment_mapping.mode_of_payment_for(settings, src.get("payment_type"))
 		if mop:
 			pe.mode_of_payment = mop
@@ -392,11 +406,18 @@ def _update_and_submit_draft(pe_name, si_name, si, src, settings, correlation_id
 		pe.wave_order_id = src.get("wave_order_id")
 		pe.wave_friendly_id = src.get("wave_friendly_id")
 		if not _doc_references_si(pe, si_name):
-			pe.append("references", {
+			row = {
 				"reference_doctype": "Sales Invoice",
 				"reference_name": si_name,
 				"allocated_amount": flt(si.outstanding_amount),
-			})
+			}
+			# When the invoice uses payment-term-based allocation, ERPNext requires
+			# the reference row to name a term. Wave invoices carry a single term, so
+			# stamp it; a multi-term invoice falls through and is flagged on submit.
+			term = _si_single_payment_term(si_name)
+			if term:
+				row["payment_term"] = term
+			pe.append("references", row)
 		pe.set_missing_values()
 		# force=True refreshes the reference row's live outstanding/total/exchange,
 		# avoiding the "already been partly paid" submit error on stale figures.
@@ -413,12 +434,29 @@ def _update_and_submit_draft(pe_name, si_name, si, src, settings, correlation_id
 		return _result(False, payment_entry=pe_name, docstatus=0, reason=f"Could not attach the invoice: {exc}")
 
 	# Same concurrent-creator guard as the create path: never submit when a second
-	# live PE (e.g. an n8n draft) shares this order.
+	# live PE (e.g. an n8n PE) shares this order.
 	others = _other_live_pes_for_order(txn, src.get("wave_order_id"), src.get("wave_friendly_id"), exclude=pe.name)
 	if others:
-		_raise_duplicate_alarm(si_name, si, pe.name, others, txn, settings, correlation_id)
-		return _result(False, payment_entry=pe.name, docstatus=0, reason="A concurrent Payment Entry was detected; reconcile to one.")
+		return _handle_concurrent_others(pe, others, si_name, si, txn, settings, correlation_id, created=False)
 	return _submit_if_reconciled(pe, si_name, si, src, settings, correlation_id, txn, created=False)
+
+
+def _handle_concurrent_others(pe, others, si_name, si, txn, settings, correlation_id, *, created) -> dict:
+	"""Resolve a concurrent second PE without submitting ours.
+
+	If any 'other' is already SUBMITTED it has settled this transaction (e.g. an
+	n8n PE) — route to the submitted-conflict alarm (never the "neither was
+	submitted" wording, which would mislead the operator into cancelling the
+	correct entry). Otherwise both are drafts -> the duplicate alarm.
+	"""
+	submitted = [o for o in others if frappe.db.get_value("Payment Entry", o, "docstatus") == 1]
+	if submitted:
+		_raise_submitted_conflict_alarm(si_name, si, submitted[0], txn, settings, correlation_id)
+		return _result(False, created=created, payment_entry=pe.name, docstatus=0,
+			reason="A submitted Payment Entry already settles this transaction; manual reconciliation required.")
+	_raise_duplicate_alarm(si_name, si, pe.name, others, txn, settings, correlation_id)
+	return _result(False, created=created, payment_entry=pe.name, docstatus=0,
+		reason="A concurrent Payment Entry was detected; reconcile to one.")
 
 
 def _submit_if_reconciled(pe, si_name, si, src, settings, correlation_id, txn, *, created) -> dict:
@@ -653,6 +691,12 @@ def _other_live_pes_for_order(txn, wave_order_id, wave_friendly_id, exclude: str
 		or_filters=_order_anchors(txn, wave_order_id, wave_friendly_id),
 		pluck="name",
 	)
+
+
+def _si_single_payment_term(si_name: str) -> str | None:
+	"""The Sales Invoice's payment term when its schedule has exactly one; else None."""
+	terms = [t for t in frappe.get_all("Payment Schedule", filters={"parent": si_name}, pluck="payment_term") if t]
+	return terms[0] if len(terms) == 1 else None
 
 
 def _pe_references_si(pe_name: str, si_name: str) -> bool:

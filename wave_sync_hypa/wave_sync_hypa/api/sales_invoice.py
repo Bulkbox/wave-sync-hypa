@@ -6,7 +6,6 @@ home.
 """
 
 import frappe
-from frappe import _
 
 from wave_sync_hypa.wave_sync_hypa.services import prepaid_pe_creator
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
@@ -28,11 +27,9 @@ def ensure_payment_entry(sales_invoice: str) -> dict:
 	correlation_id = new_correlation_id()
 	doc = frappe.get_doc("Sales Invoice", sales_invoice)
 	doc.check_permission("submit")
-	if (doc.get("wave_payment_classification") or "") != "prepaid":
-		return {
-			"ok": False, "created": False, "payment_entry": None,
-			"reason": _("This is not a prepaid Wave order."), "correlation_id": correlation_id,
-		}
+	# No classification pre-check here: find_or_create_for_si resolves "prepaid"
+	# authoritatively from the source Sales Order (via _prepaid_sources), so the
+	# button works even for invoices whose mirrored field predates this feature.
 	result = prepaid_pe_creator.find_or_create_for_si(sales_invoice, correlation_id)
 	result["correlation_id"] = correlation_id
 	frappe.db.commit()
