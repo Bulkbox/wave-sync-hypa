@@ -75,3 +75,16 @@ class TestIpayGateway(FrappeTestCase):
 		self.assertFalse(result["paid"])
 		self.assertIsNone(result["data"])
 		self.assertIn("not configured", result["error"])
+
+	def test_installed_but_stale_app_gives_actionable_error(self):
+		"""iPay installed but predating ipay.api -> clear 'update the iPay app' message, not a raw ImportError."""
+		with (
+			patch.object(ipay_gateway, "is_ipay_available", return_value=True),
+			patch.dict("sys.modules", {"ipay.api": None}),
+		):
+			result = ipay_gateway.fetch_transaction(OID)  # must not raise
+		self.assertTrue(result["available"])
+		self.assertFalse(result["paid"])
+		self.assertIsNone(result["data"])
+		self.assertIn("update the iPay app", result["error"])
+		self.assertNotIn("No module named", result["error"])
