@@ -63,6 +63,7 @@
   "coupon_sync_enabled",
   "ipay_section",
   "ipay_verification_enabled",
+  "ipay_auto_create_payment_entry",
   "wave_payment_review_assignee"
  ],
  "fields": [
@@ -432,6 +433,13 @@
    "fieldname": "ipay_verification_enabled",
    "fieldtype": "Check",
    "label": "iPay Verification Enabled"
+  },
+  {
+   "default": "0",
+   "description": "When on, wave_sync_hypa creates each prepaid order's Payment Entry itself: an unallocated draft once the iPay payment is confirmed on a submitted Sales Order, then attached to the Sales Invoice and submitted. Off => the external automation (n8n) stays the sole creator. Flip on only in lock-step with disabling the n8n Payment Entry node.",
+   "fieldname": "ipay_auto_create_payment_entry",
+   "fieldtype": "Check",
+   "label": "iPay Auto-Create Payment Entry"
   },
   {
    "description": "User who receives a ToDo when a prepaid order's iPay payment cannot be verified (iPay absent, not paid, or unreachable). Leave blank to rely on the form banner + the 'Payment Review Required' list filter alone.",
