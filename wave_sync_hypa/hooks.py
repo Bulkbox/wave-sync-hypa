@@ -43,6 +43,8 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
+extend_bootinfo = ["wave_sync_hypa.wave_sync_hypa.boot.boot_session"]
+
 doctype_js = {
 	"Sales Order": "public/js/sales_order.js",
 	"Sales Invoice": "public/js/sales_invoice.js",
