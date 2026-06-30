@@ -49,10 +49,19 @@ def build_order_payload(sales_order, customer_id: str, settings, correlation_id:
 
 
 def _resolve_lines(sales_order, settings, correlation_id: str) -> list[dict]:
-	"""Per SO line, attempt cached wave_product_id then product_resolver; return resolution records."""
+	"""Per product SO line, resolve wave_product_id; return resolution records.
+
+	Fee/shipping lines (item codes configured in Wave Settings.fee_mappings) are
+	skipped: they are charge items, not Wave catalog products, so they are never
+	pushed to Wave's order products[] — and excluding them keeps a fee line from
+	failing the resolve-everything pre-flight.
+	"""
+	fee_items = _fee_item_codes(settings)
 	out: list[dict] = []
 	for item in sales_order.get("items") or []:
 		item_code = (item.get("item_code") or "").strip()
+		if item_code in fee_items:
+			continue
 		wave_product_id = _resolve_product_id(item_code, settings, correlation_id)
 		out.append({
 			"item_code": item_code,
@@ -62,6 +71,15 @@ def _resolve_lines(sales_order, settings, correlation_id: str) -> list[dict]:
 			"wave_product_id": wave_product_id,
 		})
 	return out
+
+
+def _fee_item_codes(settings) -> set[str]:
+	"""ERP item codes mapped as Wave fees (shipping, bags, ...); never pushed as products."""
+	return {
+		(row.get("erp_item_code") or "").strip()
+		for row in (settings.get("fee_mappings") or [])
+		if (row.get("erp_item_code") or "").strip()
+	}
 
 
 def _resolve_product_id(item_code: str, settings, correlation_id: str) -> str | None:
