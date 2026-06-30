@@ -1,7 +1,9 @@
-"""Create a prepaid order's Payment Entry in-app, replacing the external n8n flow.
+"""Create a prepaid order's Payment Entry in-app — the app is the sole creator.
 
-Two phases, both gated by Wave Settings.ipay_auto_create_payment_entry (off by
-default, so n8n stays authoritative until an admin opts in):
+This replaces the external n8n flow, which no longer receives or creates prepaid
+orders / Payment Entries. Two phases, both gated by
+Wave Settings.ipay_auto_create_payment_entry (off by default; turning it on
+activates app-side creation):
 
   * SO confirm / a successful "Verify iPay Payment": once iPay has confirmed the
     payment for a submitted prepaid Sales Order, create an UNALLOCATED draft
@@ -18,12 +20,13 @@ default, so n8n stays authoritative until an admin opts in):
 One idempotent engine serves the SO worker, the SI worker, and the button. A PE
 "belongs to" an order when ANY of these match (the dedup OR-anchor): its
 references reach the SI/SO, it carries the order's wave_order_id/wave_friendly_id,
-or its reference_no equals the iPay transaction code — n8n's allocated PEs are
-caught by the stamped wave ids (our validate hook stamps them), its unallocated
-drafts by reference_no. Create / attach / submit run under a per-transaction file
-lock; before submitting we re-check for a second live PE (a concurrent n8n
-create the lock can't see) and alarm instead of double-settling. The worker and
-button paths never raise.
+or its reference_no equals the iPay transaction code. This also recognises any
+legacy n8n-created PE still in the system (allocated ones carry our stamped wave
+ids; unallocated ones match by reference_no). Create / attach / submit run under
+a per-transaction file lock that commits before releasing, so a second live PE
+(a double-click, a retry, or a legacy PE the lock can't see) is caught on the
+pre-submit re-check and alarmed instead of double-settled. The worker and button
+paths never raise.
 """
 
 from __future__ import annotations
@@ -375,8 +378,8 @@ def _create_and_submit(si_name, si, src, settings, correlation_id, txn) -> dict:
 			f"Could not build the Payment Entry for iPay transaction {txn}: {exc}")
 		return _result(False, reason=f"Could not build the Payment Entry: {exc}")
 
-	# A second live PE for this order means an external creator (n8n) raced us
-	# inside our lock window. Never submit a duplicate — alarm, leave ours a draft.
+	# A second live PE for this order — a legacy n8n entry, or a concurrent
+	# double-click / retry — never submit a duplicate; alarm, leave ours a draft.
 	others = _other_live_pes_for_order(txn, src.get("wave_order_id"), src.get("wave_friendly_id"), exclude=pe.name)
 	if others:
 		return _handle_concurrent_others(pe, others, si_name, si, txn, settings, correlation_id, created=True)
@@ -433,8 +436,8 @@ def _update_and_submit_draft(pe_name, si_name, si, src, settings, correlation_id
 			f"Could not attach this invoice to draft Payment Entry {pe_name} for iPay transaction {txn}: {exc}")
 		return _result(False, payment_entry=pe_name, docstatus=0, reason=f"Could not attach the invoice: {exc}")
 
-	# Same concurrent-creator guard as the create path: never submit when a second
-	# live PE (e.g. an n8n PE) shares this order.
+	# Same guard as the create path: never submit when a second live PE (a legacy
+	# n8n entry or a concurrent retry) shares this order.
 	others = _other_live_pes_for_order(txn, src.get("wave_order_id"), src.get("wave_friendly_id"), exclude=pe.name)
 	if others:
 		return _handle_concurrent_others(pe, others, si_name, si, txn, settings, correlation_id, created=False)
@@ -535,7 +538,7 @@ def _raise_duplicate_alarm(si_name, si, our_pe, other_pes, txn, settings, correl
 	others = ", ".join(other_pes)
 	reason = (
 		f"Duplicate Payment Entries detected for iPay transaction {txn}: {our_pe} (created by Wave Sync) "
-		f"and {others} (created concurrently, e.g. by n8n). Neither was submitted. Keep ONE, cancel/delete "
+		f"and {others} (a concurrent retry or a legacy n8n entry). Neither was submitted. Keep ONE, cancel/delete "
 		"the rest, and submit the correct one against this invoice."
 	)
 	_flag(si_name, settings, correlation_id, STEP_DUPLICATE_DETECTED, reason,
