@@ -36,10 +36,12 @@ function _suppress_ipay_buttons(frm) {
 		frm.remove_custom_button(__("iPay Request"));
 		frm.remove_custom_button(__("Copy Payment Link"));
 	};
-	// Drop now, then a few more times so a late re-add (whatever order iPay's
-	// boot-loaded handler runs in) can't leave the buttons stranded.
+	// Our doctype_js refresh is guaranteed to run after iPay's app_include_js
+	// refresh, so drop now; and re-drop on render_complete (fires once after every
+	// full re-render — save, reload_doc — when Frappe rebuilds the toolbar and
+	// iPay re-adds its buttons). Namespaced + .off() first so it never stacks.
 	drop();
-	[0, 200, 600].forEach((ms) => setTimeout(drop, ms));
+	frm.$wrapper.off("render_complete.wave_ipay").on("render_complete.wave_ipay", drop);
 }
 
 // Red banner when the prepaid invoice's Payment Entry could not be auto-created
