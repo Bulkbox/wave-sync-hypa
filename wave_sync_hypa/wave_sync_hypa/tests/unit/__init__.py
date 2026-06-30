@@ -16,6 +16,7 @@ test class via the unit package namespace. Adding a new unit test file
 requires one line here.
 """
 
+from .test_backfill_si_classification_patch import *  # noqa: F401, F403
 from .test_contact_resolver import *  # noqa: F401, F403
 from .test_coupon_intake import *  # noqa: F401, F403
 from .test_coupon_resolver import *  # noqa: F401, F403

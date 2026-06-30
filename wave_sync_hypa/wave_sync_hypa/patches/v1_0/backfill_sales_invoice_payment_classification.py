@@ -12,9 +12,18 @@ patches done-without-running). Safe to re-run.
 from __future__ import annotations
 
 import frappe
+from frappe.utils.fixtures import sync_fixtures
 
 
 def execute():
+	# wave_payment_classification ships as a Custom Field fixture, which Frappe
+	# syncs in post_schema_updates — AFTER this post_model_sync patch. On an existing
+	# site seeing the field for the first time the column doesn't exist yet, so the
+	# backfill query below would raise "Unknown column". Create the app's fixtures
+	# now (idempotent; the later post_schema_updates sync is then a no-op).
+	if not frappe.db.has_column("Sales Invoice", "wave_payment_classification"):
+		sync_fixtures("wave_sync_hypa")
+
 	invoices = frappe.get_all(
 		"Sales Invoice",
 		filters={"wave_order_id": ["is", "set"], "wave_payment_classification": ["in", ["", None]]},
