@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import frappe
 
-from wave_sync_hypa.wave_sync_hypa.handlers import order_status
+from wave_sync_hypa.wave_sync_hypa.handlers import order_status, prepaid_pe
 from wave_sync_hypa.wave_sync_hypa.services import credit_note_classifier
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
@@ -59,9 +59,14 @@ def stamp_wave_order_id(doc, method=None) -> None:
 	if not wave_ids:
 		return
 	doc.wave_order_id = wave_ids[0]
-	doc.wave_friendly_id = (
-		frappe.db.get_value("Sales Order", {"wave_order_id": wave_ids[0]}, "wave_friendly_id") or ""
-	)
+	# Mirror the source order's friendly id + prepaid/cod classification in one
+	# read so the SI form can show the "Wave Payment Entry" button synchronously.
+	source = frappe.db.get_value(
+		"Sales Order", {"wave_order_id": wave_ids[0]},
+		["wave_friendly_id", "wave_payment_classification"], as_dict=True,
+	) or {}
+	doc.wave_friendly_id = source.get("wave_friendly_id") or ""
+	doc.wave_payment_classification = source.get("wave_payment_classification") or ""
 	if len(wave_ids) > 1:
 		log_step(
 			correlation_id=new_correlation_id(),
@@ -105,6 +110,11 @@ def on_sales_invoice_submit(doc, method=None) -> None:
 		return
 
 	order_status.dispatch_with_wave_order_ids(doc, "submit", wave_ids)
+
+	# Gate on the stamped classification to skip COD / non-Wave invoices; the
+	# worker re-checks prepaid authoritatively.
+	if wave_ids and (doc.get("wave_payment_classification") or "") == "prepaid":
+		prepaid_pe.maybe_enqueue_attach_for_si(doc.name)
 
 
 def _handle_return(doc, wave_ids: list[str]) -> None:

@@ -43,8 +43,11 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
+extend_bootinfo = ["wave_sync_hypa.wave_sync_hypa.boot.boot_session"]
+
 doctype_js = {
 	"Sales Order": "public/js/sales_order.js",
+	"Sales Invoice": "public/js/sales_invoice.js",
 	"Wave Settings": "public/js/wave_settings.js",
 	"Item": "public/js/item.js",
 	"Pick List": "public/js/pick_list.js",
@@ -158,6 +161,7 @@ doc_events = {
 		"on_submit": [
 			"wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_submit",
 			"wave_sync_hypa.wave_sync_hypa.handlers.order_status.maybe_auto_push_to_wave",
+			"wave_sync_hypa.wave_sync_hypa.handlers.prepaid_pe.enqueue_draft_on_so_submit",
 		],
 		"on_cancel": "wave_sync_hypa.wave_sync_hypa.handlers.order_status.on_sales_order_cancel",
 	},

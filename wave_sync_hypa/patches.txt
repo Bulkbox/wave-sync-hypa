@@ -13,3 +13,4 @@ wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_order_update_route_rule
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_order_create_route_rule
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_customer_update_route_rule
 wave_sync_hypa.wave_sync_hypa.patches.v1_0.seed_default_shipping_cost_item
+wave_sync_hypa.wave_sync_hypa.patches.v1_0.backfill_sales_invoice_payment_classification

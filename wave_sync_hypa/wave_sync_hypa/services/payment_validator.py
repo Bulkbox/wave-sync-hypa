@@ -8,8 +8,8 @@ Wired in hooks.py:
 Behaviour, applied to every PE submission:
 
   * No Wave-sourced references at all -> pass through. Existing manual non-Wave
-    PEs and the n8n unallocated-state "Ipay Unallocated" PE (which has
-    references = []) are unaffected.
+    PEs and any legacy n8n unallocated-state "Ipay Unallocated" PE (references =
+    []) are unaffected.
   * Mixed prepaid + COD references in one PE -> hard block. Reconciliation
     becomes ambiguous; the user has confirmed split-into-two is the answer.
   * Prepaid PE without a Sales Invoice reference -> hard block. Accounting
@@ -18,9 +18,9 @@ Behaviour, applied to every PE submission:
     before submitting.
   * Prepaid PE with amount divergence (>= FULL_PAYMENT_TOLERANCE) -> hard block.
   * Prepaid PE with MOP differing from the mapping table -> Warning, not block.
-    The current n8n flow hardcodes `MPESA` on every iPay PE; we don't want to
-    break it. Tightening to a hard block is a separate ticket once n8n is
-    updated to consult the mapping.
+    The app now sets the mapped Mode of Payment itself, so a mismatch is
+    unexpected; kept warn-only as a safe default (legacy n8n PEs hardcoded
+    `MPESA`). Tightening to a hard block is a separate ticket.
   * COD PE whose mode_of_payment is classified `prepaid` (or unknown) -> block.
 
 Override role `Wave Payment Validator Override` (or System Manager) bypasses
@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import frappe
 
+from wave_sync_hypa.wave_sync_hypa.services import payment_mapping
 from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.payment_status_resolver import FULL_PAYMENT_TOLERANCE
@@ -263,11 +264,7 @@ def _expected_mop_for_payment_type(payment_type: str) -> str | None:
 	"""Look up the mapping row for paymentType and return its mode_of_payment, or None."""
 	if not payment_type:
 		return None
-	settings = frappe.get_cached_doc("Wave Settings")
-	for row in settings.get("payment_method_mappings") or []:
-		if (row.get("wave_payment_type") or "").strip() == payment_type:
-			return (row.get("mode_of_payment") or "").strip() or None
-	return None
+	return payment_mapping.mode_of_payment_for(frappe.get_cached_doc("Wave Settings"), payment_type)
 
 
 def _classify_mode_of_payment(mop: str) -> str | None:
