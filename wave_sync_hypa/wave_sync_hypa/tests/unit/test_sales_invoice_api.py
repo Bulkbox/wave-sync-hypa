@@ -39,7 +39,7 @@ class TestEnsurePaymentEntry(FrappeTestCase):
 		mock_engine.assert_called_once()
 
 	def test_prepaid_delegates_and_returns_envelope(self):
-		envelope = {"ok": True, "created": True, "payment_entry": "ACC-PAY-X", "docstatus": 1, "reason": "Payment Entry submitted."}
+		envelope = {"ok": True, "created": True, "payment_entry": "ACC-PAY-X", "reason": "Payment Entry submitted."}
 		doc = _doc()
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),

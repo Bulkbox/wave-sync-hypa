@@ -23,10 +23,8 @@ references reach the SI/SO, it carries the order's wave_order_id/wave_friendly_i
 or its reference_no equals the iPay transaction code. This also recognises any
 legacy n8n-created PE still in the system (allocated ones carry our stamped wave
 ids; unallocated ones match by reference_no). Create / attach / submit run under
-a per-transaction file lock that commits before releasing, so a second live PE
-(a double-click, a retry, or a legacy PE the lock can't see) is caught on the
-pre-submit re-check and alarmed instead of double-settled. The worker and button
-paths never raise.
+a per-transaction file lock (the lock sites carry the commit-before-release
+reasoning). The worker and button paths never raise.
 """
 
 from __future__ import annotations
@@ -40,7 +38,6 @@ from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_ent
 from erpnext.accounts.doctype.sales_invoice.sales_invoice import get_bank_cash_account
 
 from wave_sync_hypa.wave_sync_hypa.services import ipay_payment_sync, payment_mapping, payment_review_flag
-from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_id
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.master_switch import is_wave_integration_enabled
 from wave_sync_hypa.wave_sync_hypa.services.payment_status_resolver import FULL_PAYMENT_TOLERANCE
@@ -83,9 +80,9 @@ STEP_SUBMITTED = "prepaid_pe_submitted"
 STEP_UNEXPECTED_ERROR = "prepaid_pe_unexpected_error"
 
 
-def _result(ok, *, created=False, payment_entry=None, docstatus=None, reason=None) -> dict:
+def _result(ok, *, created=False, payment_entry=None, reason=None) -> dict:
 	"""Uniform envelope returned to the button (and ignored by the fire-and-forget workers)."""
-	return {"ok": ok, "created": created, "payment_entry": payment_entry, "docstatus": docstatus, "reason": reason}
+	return {"ok": ok, "created": created, "payment_entry": payment_entry, "reason": reason}
 
 
 # --------------------------------------------------------------------------- #
@@ -183,7 +180,7 @@ def ensure_draft_pe_for_order(so_name: str, correlation_id: str, *, settings=Non
 
 def _build_unallocated_draft(so_name, so, txn, settings, correlation_id) -> None:
 	"""Insert an unallocated Receive PE carrying the iPay details; references=[]."""
-	amount = flt(so.get("wave_payment_hold")) + flt(so.get("wave_additional_payment_hold"))
+	amount = _authorised_hold(so)
 	if amount <= 0:
 		amount = flt(so.get("wave_ipay_transaction_amount"))
 	if amount <= 0:
@@ -262,9 +259,8 @@ def attach_and_submit_worker(*, sales_invoice: str, correlation_id: str) -> None
 		_log_unexpected("Sales Invoice", sales_invoice, correlation_id, exc, "attach_and_submit_worker")
 
 
-def find_or_create_for_si(si_name: str, correlation_id: str | None = None) -> dict:
+def find_or_create_for_si(si_name: str, correlation_id: str) -> dict:
 	"""Button / sync path: ensure the prepaid PE for this SI exists and is submitted. Returns an envelope."""
-	correlation_id = correlation_id or new_correlation_id()
 	if not is_wave_integration_enabled():
 		return _result(False, reason="Wave integration is disabled.")
 	settings = frappe.get_cached_doc("Wave Settings")
@@ -343,9 +339,9 @@ def _settle_under_lock(si_name, si, src, settings, correlation_id, txn) -> dict:
 				doc_type="Sales Invoice", linked_doctype="Sales Invoice", linked_docname=si_name,
 				request_body={"payment_entry": name, "transaction_code": txn},
 			)
-			return _result(True, created=False, payment_entry=name, docstatus=1, reason="Payment Entry already settles this invoice.")
+			return _result(True, created=False, payment_entry=name, reason="Payment Entry already settles this invoice.")
 		_raise_submitted_conflict_alarm(si_name, si, name, txn, settings, correlation_id)
-		return _result(False, payment_entry=name, docstatus=1, reason="A submitted Payment Entry already owns this transaction; manual reconciliation required.")
+		return _result(False, payment_entry=name, reason="A submitted Payment Entry already owns this transaction; manual reconciliation required.")
 
 	return _create_and_submit(si_name, si, src, settings, correlation_id, txn)
 
@@ -360,7 +356,6 @@ def _create_and_submit(si_name, si, src, settings, correlation_id, txn) -> dict:
 		mop = payment_mapping.mode_of_payment_for(settings, src.get("payment_type"))
 		if mop:
 			pe.mode_of_payment = mop
-			# Keep the deposit account consistent with the chosen MOP.
 			bank = _bank_account_for(mop, pe.company)
 			if bank:
 				pe.paid_to = bank
@@ -434,7 +429,7 @@ def _update_and_submit_draft(pe_name, si_name, si, src, settings, correlation_id
 	except Exception as exc:
 		_flag(si_name, settings, correlation_id, STEP_SUBMIT_BLOCKED,
 			f"Could not attach this invoice to draft Payment Entry {pe_name} for iPay transaction {txn}: {exc}")
-		return _result(False, payment_entry=pe_name, docstatus=0, reason=f"Could not attach the invoice: {exc}")
+		return _result(False, payment_entry=pe_name, reason=f"Could not attach the invoice: {exc}")
 
 	# Same guard as the create path: never submit when a second live PE (a legacy
 	# n8n entry or a concurrent retry) shares this order.
@@ -455,10 +450,10 @@ def _handle_concurrent_others(pe, others, si_name, si, txn, settings, correlatio
 	submitted = [o for o in others if frappe.db.get_value("Payment Entry", o, "docstatus") == 1]
 	if submitted:
 		_raise_submitted_conflict_alarm(si_name, si, submitted[0], txn, settings, correlation_id)
-		return _result(False, created=created, payment_entry=pe.name, docstatus=0,
+		return _result(False, created=created, payment_entry=pe.name,
 			reason="A submitted Payment Entry already settles this transaction; manual reconciliation required.")
 	_raise_duplicate_alarm(si_name, si, pe.name, others, txn, settings, correlation_id)
-	return _result(False, created=created, payment_entry=pe.name, docstatus=0,
+	return _result(False, created=created, payment_entry=pe.name,
 		reason="A concurrent Payment Entry was detected; reconcile to one.")
 
 
@@ -469,7 +464,7 @@ def _submit_if_reconciled(pe, si_name, si, src, settings, correlation_id, txn, *
 	prepaid order should carry an authorised amount, so its absence is itself a
 	reason to hold the Payment Entry as a draft for manual review.
 	"""
-	expected = flt(src.get("wave_payment_hold")) + flt(src.get("wave_additional_payment_hold"))
+	expected = _authorised_hold(src)
 	grand_total = flt(si.grand_total)
 	if not expected:
 		_flag(
@@ -479,7 +474,7 @@ def _submit_if_reconciled(pe, si_name, si, src, settings, correlation_id, txn, *
 			"not be verified. Verify the iPay payment and submit manually.",
 			request_body={"payment_entry": pe.name, "grand_total": grand_total, "expected": expected},
 		)
-		return _result(False, created=created, payment_entry=pe.name, docstatus=0, reason="No Wave-authorised amount to verify against; left as a draft.")
+		return _result(False, created=created, payment_entry=pe.name, reason="No Wave-authorised amount to verify against; left as a draft.")
 	if abs(grand_total - expected) >= FULL_PAYMENT_TOLERANCE:
 		_flag(
 			si_name, settings, correlation_id, STEP_AMOUNT_MISMATCH,
@@ -488,7 +483,7 @@ def _submit_if_reconciled(pe, si_name, si, src, settings, correlation_id, txn, *
 			"Review the amounts and submit the Payment Entry manually.",
 			request_body={"payment_entry": pe.name, "grand_total": grand_total, "expected": expected},
 		)
-		return _result(False, created=created, payment_entry=pe.name, docstatus=0, reason="Invoice total does not match the authorised amount; left as a draft.")
+		return _result(False, created=created, payment_entry=pe.name, reason="Invoice total does not match the authorised amount; left as a draft.")
 	return _submit(pe, si_name, settings, correlation_id, txn, created=created)
 
 
@@ -499,7 +494,7 @@ def _submit(pe, si_name, settings, correlation_id, txn, *, created) -> dict:
 	except Exception as exc:
 		_flag(si_name, settings, correlation_id, STEP_SUBMIT_BLOCKED,
 			f"Payment Entry {pe.name} for iPay transaction {txn} could not be submitted: {exc}")
-		return _result(False, created=created, payment_entry=pe.name, docstatus=0, reason=f"Payment Entry could not be submitted: {exc}")
+		return _result(False, created=created, payment_entry=pe.name, reason=f"Payment Entry could not be submitted: {exc}")
 	frappe.db.set_value("Sales Invoice", si_name, "wave_payment_entry", pe.name, update_modified=False)
 	payment_review_flag.clear("Sales Invoice", si_name, settings=settings, correlation_id=correlation_id)
 	log_step(
@@ -507,11 +502,11 @@ def _submit(pe, si_name, settings, correlation_id, txn, *, created) -> dict:
 		doc_type="Sales Invoice", linked_doctype="Payment Entry", linked_docname=pe.name,
 		request_body={"sales_invoice": si_name, "transaction_code": txn},
 	)
-	return _result(True, created=created, payment_entry=pe.name, docstatus=1, reason="Payment Entry submitted.")
+	return _result(True, created=created, payment_entry=pe.name, reason="Payment Entry submitted.")
 
 
 # --------------------------------------------------------------------------- #
-# Alarms (verbatim from the prepaid-PE design; idempotent, best-effort)
+# Alarms — idempotent, best-effort
 # --------------------------------------------------------------------------- #
 def _raise_submitted_conflict_alarm(si_name, si, pe_name, txn, settings, correlation_id) -> None:
 	"""A submitted PE owns this txn but not this SI: never touch it; alarm loudly for manual reconciliation."""
@@ -716,6 +711,11 @@ def _doc_references_si(pe, si_name: str) -> bool:
 		r.reference_doctype == "Sales Invoice" and r.reference_name == si_name
 		for r in (pe.references or [])
 	)
+
+
+def _authorised_hold(d) -> float:
+	"""The Wave-authorised amount for an order: payment hold + additional hold."""
+	return flt(d.get("wave_payment_hold")) + flt(d.get("wave_additional_payment_hold"))
 
 
 def _bank_account_for(mode_of_payment, company) -> str | None:

@@ -511,7 +511,7 @@ class TestButtonEntry(FrappeTestCase):
 		mock_core.assert_not_called()
 
 	def test_delegates_when_enabled(self):
-		envelope = pe_creator._result(True, created=True, payment_entry="ACC-PAY-X", docstatus=1)
+		envelope = pe_creator._result(True, created=True, payment_entry="ACC-PAY-X")
 		with (
 			patch.object(pe_creator, "is_wave_integration_enabled", return_value=True),
 			patch.object(frappe, "get_cached_doc", return_value=_settings(auto=1)),

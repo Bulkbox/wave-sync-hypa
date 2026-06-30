@@ -111,9 +111,8 @@ def on_sales_invoice_submit(doc, method=None) -> None:
 
 	order_status.dispatch_with_wave_order_ids(doc, "submit", wave_ids)
 
-	# Prepaid orders: attach this invoice to the iPay Payment Entry and submit it
-	# (find-or-create). Gate on the stamped classification to skip COD / non-Wave
-	# invoices; the worker still re-checks prepaid authoritatively.
+	# Gate on the stamped classification to skip COD / non-Wave invoices; the
+	# worker re-checks prepaid authoritatively.
 	if wave_ids and (doc.get("wave_payment_classification") or "") == "prepaid":
 		prepaid_pe.maybe_enqueue_attach_for_si(doc.name)
 

@@ -1,12 +1,10 @@
 // "Wave Payment Entry" action for prepaid Wave Sales Invoices.
 //
 // For a prepaid order we own the iPay Payment Entry, so the iPay app's own
-// buttons are removed and replaced by a single Wave action. The button shows
-// while the invoice still has an outstanding balance (i.e. no payment fully
-// settles it) — once a Payment Entry settles it the outstanding is 0 and the
-// action hides; if a payment is later unlinked/cancelled the outstanding returns
-// and the button reappears. Clicking it runs the same idempotent engine as the
-// SI-submit worker, so it creates the PE on error or confirms an existing one.
+// buttons are removed and replaced by a single Wave action. Shown while the
+// invoice is unpaid (outstanding > 0) — so it reappears if a payment is later
+// unlinked/cancelled. The action runs the same idempotent engine as the
+// SI-submit worker, creating the PE on error or confirming an existing one.
 
 frappe.ui.form.on("Sales Invoice", {
 	refresh(frm) {
@@ -45,10 +43,7 @@ function _suppress_ipay_buttons(frm) {
 	frm.$wrapper.off("render_complete.wave_ipay").on("render_complete.wave_ipay", drop);
 }
 
-// Red banner when the prepaid invoice's Payment Entry could not be auto-created
-// / submitted (amount mismatch, unverified payment, or a conflict). The reason
-// is carried on the doc; the operator resolves it via the Wave Payment Entry
-// button (or by reconciling manually).
+// Red intro banner carrying the doc's payment-review reason.
 function _render_payment_review_banner(frm) {
 	const reason = frm.doc.wave_payment_review_reason || __("the Payment Entry could not be created");
 	frm.set_intro(
