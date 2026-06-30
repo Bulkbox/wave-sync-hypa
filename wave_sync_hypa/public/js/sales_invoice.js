@@ -2,10 +2,11 @@
 //
 // For a prepaid order we own the iPay Payment Entry, so the iPay app's own
 // buttons are removed and replaced by a single Wave action. The button shows
-// only while the invoice has no submitted Payment Entry yet (wave_payment_entry
-// unset) — once the PE is submitted the invoice is Paid and the action is no
-// longer needed. Clicking it runs the same idempotent engine as the SI-submit
-// worker, so it creates the PE on error or confirms an existing one.
+// while the invoice still has an outstanding balance (i.e. no payment fully
+// settles it) — once a Payment Entry settles it the outstanding is 0 and the
+// action hides; if a payment is later unlinked/cancelled the outstanding returns
+// and the button reappears. Clicking it runs the same idempotent engine as the
+// SI-submit worker, so it creates the PE on error or confirms an existing one.
 
 frappe.ui.form.on("Sales Invoice", {
 	refresh(frm) {
@@ -21,7 +22,7 @@ frappe.ui.form.on("Sales Invoice", {
 			return;
 		}
 		_suppress_ipay_buttons(frm);
-		if (frm.doc.docstatus === 1 && !frm.doc.wave_payment_entry) {
+		if (frm.doc.docstatus === 1 && frm.doc.outstanding_amount > 0) {
 			_add_wave_payment_entry_button(frm);
 		}
 	},
