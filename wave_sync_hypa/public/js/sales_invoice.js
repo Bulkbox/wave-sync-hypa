@@ -36,8 +36,10 @@ function _suppress_ipay_buttons(frm) {
 		frm.remove_custom_button(__("iPay Request"));
 		frm.remove_custom_button(__("Copy Payment Link"));
 	};
+	// Drop now, then a few more times so a late re-add (whatever order iPay's
+	// boot-loaded handler runs in) can't leave the buttons stranded.
 	drop();
-	setTimeout(drop, 0);
+	[0, 200, 600].forEach((ms) => setTimeout(drop, ms));
 }
 
 // Red banner when the prepaid invoice's Payment Entry could not be auto-created
