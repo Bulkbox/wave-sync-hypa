@@ -36,6 +36,7 @@ import frappe
 
 from wave_sync_hypa.wave_sync_hypa.handlers import order_status
 from wave_sync_hypa.wave_sync_hypa.services import (
+	payment_review_flag,
 	payment_status_pusher,
 	payment_status_resolver,
 	payment_validator,
@@ -165,6 +166,22 @@ def on_payment_entry_submit(doc, method=None) -> None:
 		order_status.dispatch_with_wave_order_ids(
 			doc, "payment_entry_completion", settled_orders, forced_payload={"status": "COMPLETED"}
 		)
+
+
+def clear_wave_payment_review_on_submit(doc, method=None) -> None:
+	"""on_submit: clear the payment-review banner on any Wave SI this PE settles.
+
+	The engine clears the flag when it submits the PE itself; this covers an
+	operator submitting the draft PE directly in the PE form (bypassing the
+	engine), so the SI's red review banner clears on any submit path. Ungated by
+	the master switch — clearing a stale local flag is always correct.
+	"""
+	for ref in doc.get("references") or []:
+		if (ref.get("reference_doctype") or "") != "Sales Invoice":
+			continue
+		si_name = ref.get("reference_name")
+		if si_name and frappe.db.get_value("Sales Invoice", si_name, "wave_payment_review_required"):
+			payment_review_flag.clear("Sales Invoice", si_name, correlation_id=new_correlation_id())
 
 
 def _complete_on_payment_entry() -> bool:

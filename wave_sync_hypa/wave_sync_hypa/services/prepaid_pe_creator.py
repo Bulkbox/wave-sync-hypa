@@ -274,7 +274,7 @@ def attach_and_submit_for_si(si_name: str, correlation_id: str, *, settings=None
 	settings = settings or frappe.get_cached_doc("Wave Settings")
 	si = frappe.db.get_value(
 		"Sales Invoice", si_name,
-		["docstatus", "is_return", "customer", "outstanding_amount", "grand_total", "debit_to", "owner"],
+		["docstatus", "is_return", "customer", "outstanding_amount", "grand_total", "rounded_total", "debit_to", "owner"],
 		as_dict=True,
 	)
 	if not si or si.docstatus != 1 or si.is_return:
@@ -465,23 +465,27 @@ def _submit_if_reconciled(pe, si_name, si, src, settings, correlation_id, txn, *
 	reason to hold the Payment Entry as a draft for manual review.
 	"""
 	expected = _authorised_hold(src)
-	grand_total = flt(si.grand_total)
+	# Reconcile against the rounded total — the amount the customer is actually
+	# charged / pays when Rounded Total is enabled, and what the PE allocates via
+	# outstanding_amount. Falls back to grand_total when rounding is disabled
+	# (rounded_total = 0), so sub-unit rounding deltas don't force a needless draft.
+	total = flt(si.rounded_total) or flt(si.grand_total)
 	if not expected:
 		_flag(
 			si_name, settings, correlation_id, STEP_AMOUNT_MISMATCH,
 			f"Payment Entry {pe.name} was created as a DRAFT but NOT submitted: no Wave-authorised amount "
-			f"(payment hold) is recorded for this prepaid order, so the invoice total {grand_total:.2f} could "
+			f"(payment hold) is recorded for this prepaid order, so the invoice total {total:.2f} could "
 			"not be verified. Verify the iPay payment and submit manually.",
-			request_body={"payment_entry": pe.name, "grand_total": grand_total, "expected": expected},
+			request_body={"payment_entry": pe.name, "invoice_total": total, "expected": expected},
 		)
 		return _result(False, created=created, payment_entry=pe.name, reason="No Wave-authorised amount to verify against; left as a draft.")
-	if abs(grand_total - expected) >= FULL_PAYMENT_TOLERANCE:
+	if abs(total - expected) >= FULL_PAYMENT_TOLERANCE:
 		_flag(
 			si_name, settings, correlation_id, STEP_AMOUNT_MISMATCH,
-			f"Payment Entry {pe.name} was created as a DRAFT but NOT submitted: invoice total {grand_total:.2f} "
-			f"does not match the iPay/Wave authorised amount {expected:.2f} (difference {grand_total - expected:+.2f}). "
+			f"Payment Entry {pe.name} was created as a DRAFT but NOT submitted: invoice total {total:.2f} "
+			f"does not match the iPay/Wave authorised amount {expected:.2f} (difference {total - expected:+.2f}). "
 			"Review the amounts and submit the Payment Entry manually.",
-			request_body={"payment_entry": pe.name, "grand_total": grand_total, "expected": expected},
+			request_body={"payment_entry": pe.name, "invoice_total": total, "expected": expected},
 		)
 		return _result(False, created=created, payment_entry=pe.name, reason="Invoice total does not match the authorised amount; left as a draft.")
 	return _submit(pe, si_name, settings, correlation_id, txn, created=created)
