@@ -299,3 +299,36 @@ class TestPaymentEntryCustomerGate(FrappeTestCase):
 		mock_resolve.assert_not_called()
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pe_handler.wave_customer_resolver.STEP_ERP_TO_WAVE_CUSTOMER_DISABLED, steps)
+
+
+class TestClearWavePaymentReviewOnSubmit(FrappeTestCase):
+	"""on_submit: clear the SI review banner for any referenced flagged Wave SI (covers manual PE submit)."""
+
+	def test_clears_flag_on_flagged_referenced_si(self):
+		doc = _pe(references=[_ref("Sales Invoice", "SI-001")])
+		with (
+			patch.object(frappe.db, "get_value", return_value=1),  # wave_payment_review_required set
+			patch.object(pe_handler.payment_review_flag, "clear") as mock_clear,
+		):
+			pe_handler.clear_wave_payment_review_on_submit(doc)
+		mock_clear.assert_called_once()
+		self.assertEqual(mock_clear.call_args.args[:2], ("Sales Invoice", "SI-001"))
+
+	def test_no_clear_when_flag_not_set(self):
+		doc = _pe(references=[_ref("Sales Invoice", "SI-001")])
+		with (
+			patch.object(frappe.db, "get_value", return_value=0),
+			patch.object(pe_handler.payment_review_flag, "clear") as mock_clear,
+		):
+			pe_handler.clear_wave_payment_review_on_submit(doc)
+		mock_clear.assert_not_called()
+
+	def test_ignores_non_sales_invoice_references(self):
+		doc = _pe(references=[_ref("Sales Order", "SO-001"), _ref("Journal Entry", "JE-001")])
+		with (
+			patch.object(frappe.db, "get_value", return_value=1) as mock_get,
+			patch.object(pe_handler.payment_review_flag, "clear") as mock_clear,
+		):
+			pe_handler.clear_wave_payment_review_on_submit(doc)
+		mock_clear.assert_not_called()
+		mock_get.assert_not_called()

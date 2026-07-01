@@ -38,10 +38,11 @@ def _settings(auto=1):
 
 
 def _si_row(docstatus=1, is_return=0, customer="Cust", outstanding=260.0, grand_total=260.0,
-	debit_to="Debtors - X", owner="ops@example.com"):
+	rounded_total=0.0, debit_to="Debtors - X", owner="ops@example.com"):
 	return frappe._dict(
 		docstatus=docstatus, is_return=is_return, customer=customer,
-		outstanding_amount=outstanding, grand_total=grand_total, debit_to=debit_to, owner=owner,
+		outstanding_amount=outstanding, grand_total=grand_total, rounded_total=rounded_total,
+		debit_to=debit_to, owner=owner,
 	)
 
 
@@ -256,6 +257,28 @@ class TestAttachAndSubmit(FrappeTestCase):
 		steps = [c.kwargs.get("step") for c in mock_log.call_args_list]
 		self.assertIn(pe_creator.STEP_CREATED, steps)
 		self.assertIn(pe_creator.STEP_SUBMITTED, steps)
+
+	def test_submits_on_rounded_total_when_grand_total_has_rounding_delta(self):
+		# Production case: grand_total 6442.12, rounded_total 6442.00, hold 6442.00.
+		# Comparing grand_total would falsely mismatch (+0.12) and leave a draft;
+		# reconciling against rounded_total submits.
+		fake_pe = MagicMock(name="PE")
+		fake_pe.name = "ACC-PAY-04254"
+		with (
+			patch.object(frappe.db, "get_value",
+				return_value=_si_row(grand_total=6442.12, rounded_total=6442.00, outstanding=6442.00)),
+			patch.object(frappe.db, "set_value"),
+			patch.object(pe_creator, "_prepaid_sources", return_value=_source(hold=6442.00)),
+			patch.object(pe_creator, "_find_pe_for_order", return_value=None),
+			patch.object(pe_creator, "_other_live_pes_for_order", return_value=[]),
+			patch.object(pe_creator, "get_payment_entry", return_value=fake_pe),
+			patch.object(pe_creator.payment_review_flag, "clear"),
+			patch.object(pe_creator, "log_step") as mock_log,
+		):
+			res = pe_creator.attach_and_submit_for_si(SI, "c", settings=_settings())
+		self.assertTrue(res["ok"])
+		fake_pe.submit.assert_called_once()
+		self.assertIn(pe_creator.STEP_SUBMITTED, [c.kwargs.get("step") for c in mock_log.call_args_list])
 
 	def test_amount_mismatch_creates_draft_but_does_not_submit(self):
 		fake_pe = MagicMock(name="PE")
