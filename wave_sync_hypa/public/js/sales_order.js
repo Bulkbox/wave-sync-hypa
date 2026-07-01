@@ -19,10 +19,11 @@ frappe.ui.form.on("Sales Order", {
 		if (frm.doc.wave_payment_review_required) {
 			_render_payment_review_banner(frm);
 		}
-		// iPay verification is operator-explicit, so the button shows on any
-		// prepaid Wave order regardless of docstatus — an accountant may want
-		// to re-check a payment before or after submitting / invoicing.
-		if (frm.doc.wave_payment_classification === "prepaid") {
+		// Verify iPay Payment shows on a prepaid Wave order — regardless of
+		// docstatus while unpaid, so an accountant can re-check before or after
+		// submitting — until iPay confirms the payment (wave_ipay_paid). Once
+		// paid there is nothing left to verify, so it hides.
+		if (frm.doc.wave_payment_classification === "prepaid" && !frm.doc.wave_ipay_paid) {
 			_add_verify_ipay_button(frm);
 		}
 		// Manual status re-push is hidden once the SO is submitted: by then the
