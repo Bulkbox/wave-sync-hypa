@@ -10,13 +10,15 @@ so n8n's call lands in our wrapper instead. The wrapper:
   1. Calls the upstream function FIRST. Upstream side effects (writing
      `custom_order_stage` on the Sales Order, syncing to CS-Cart) always
      land, regardless of which stage was computed.
-  2. If upstream's result reports `new_stage == "Delivered"` AND the Sales
-     Order has a `wave_order_id`, dispatches a Wave order-status push with
-     forced_payload {"status": "COMPLETED"}.
+  2. If upstream's `new_stage` is one of the configured completion stages
+     (Wave Settings.shipday_completion_stages; default "Delivered" + "Partial Delivery") AND the
+     Sales Order has a `wave_order_id`, dispatches a Wave order-status push
+     with forced_payload {"status": "COMPLETED"}.
   3. Wave dispatch is wrapped in try/except so a Wave outage never disturbs
      the upstream return value or breaks the CS-Cart sync.
 
-"Failed" / "Partial Delivery" stages: ERP is updated normally, no Wave push.
+Any stage not listed (e.g. "Failed", or "Partial Delivery" unless configured):
+ERP is updated normally, no Wave push.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from wave_sync_hypa.wave_sync_hypa.services.correlation import new_correlation_i
 from wave_sync_hypa.wave_sync_hypa.services.logger import log_step
 from wave_sync_hypa.wave_sync_hypa.services.master_switch import skip_if_disabled
 
-STAGE_DELIVERED = "Delivered"
+DEFAULT_COMPLETION_STAGES = "Delivered\nPartial Delivery"
 WAVE_STATUS_COMPLETED = "COMPLETED"
 EVENT_SHIPDAY_DELIVERED = "shipday_delivered"
 
@@ -39,17 +41,32 @@ STEP_DISPATCHED = "shipday_delivered_dispatched"
 STEP_FAILED = "shipday_delivered_dispatch_failed"
 
 
+def _norm(stage) -> str:
+	"""Normalise a stage for comparison: drop ALL whitespace, case-insensitive."""
+	return "".join((stage or "").split()).casefold()
+
+
+def _completion_stages(settings) -> set[str]:
+	"""Shipday stages that complete the Wave order — from Wave Settings, one per
+	line, whitespace-stripped + case-insensitive. Empty falls back to the default
+	(Delivered + Partial Delivery)."""
+	raw = (settings.get("shipday_completion_stages") or "").strip() or DEFAULT_COMPLETION_STAGES
+	return {_norm(line) for line in raw.splitlines() if line.strip()}
+
+
 @frappe.whitelist()
 def order_stage(delivery_note: str) -> dict:
-	"""Run upstream order_stage, then push Wave COMPLETED on Delivered.
+	"""Run upstream order_stage, then push Wave COMPLETED on a completing stage.
 
-	Upstream runs first; its side effects always land. Wave dispatch runs
-	only when the resulting stage is "Delivered" AND the SO is Wave-linked.
-	Wave-side exceptions are swallowed + audited; the upstream return value
-	is handed back to the caller unchanged.
+	Upstream runs first; its side effects always land. Wave dispatch runs only
+	when the resulting stage is one of the configured completion stages
+	(Wave Settings.shipday_completion_stages; default "Delivered" + "Partial Delivery") AND the SO is
+	Wave-linked. Wave-side exceptions are swallowed + audited; the upstream return
+	value is handed back to the caller unchanged.
 	"""
 	result = _upstream_order_stage(delivery_note)
-	if (result or {}).get("new_stage") != STAGE_DELIVERED:
+	new_stage = _norm((result or {}).get("new_stage"))
+	if not new_stage or new_stage not in _completion_stages(frappe.get_cached_doc("Wave Settings")):
 		return result
 	sales_order = ((result or {}).get("sales_order") or "").strip()
 	if not sales_order:

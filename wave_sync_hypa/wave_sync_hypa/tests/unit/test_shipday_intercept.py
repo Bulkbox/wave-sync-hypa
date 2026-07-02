@@ -12,6 +12,7 @@ Confirms:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
@@ -23,6 +24,13 @@ from wave_sync_hypa.wave_sync_hypa.handlers import order_status
 DUMMY_DN = "MAT-DN-2026-00001"
 DUMMY_SO = "SAL-ORD-2026-00001"
 WAVE_ID = "wave-id-aaa"
+
+
+def _settings(stages: str = "Delivered") -> SimpleNamespace:
+	"""Mock Wave Settings whose shipday_completion_stages field holds `stages`."""
+	s = SimpleNamespace()
+	s.get = lambda key, default=None: {"shipday_completion_stages": stages}.get(key, default)
+	return s
 
 
 def _upstream_result(new_stage: str, sales_order: str = DUMMY_SO) -> dict:
@@ -45,6 +53,11 @@ class TestShipdayInterceptOrderStage(FrappeTestCase):
 		guard = patch.object(shipday_intercept, "skip_if_disabled", return_value=False)
 		guard.start()
 		self.addCleanup(guard.stop)
+		# Default completion stages = "Delivered" (the shipped default); individual
+		# tests override get_cached_doc to configure other stages.
+		settings_guard = patch.object(frappe, "get_cached_doc", return_value=_settings("Delivered"))
+		settings_guard.start()
+		self.addCleanup(settings_guard.stop)
 
 	def test_delivered_with_wave_order_id_dispatches_completed(self):
 		"""Delivered + SO has wave_order_id -> dispatch fires with forced COMPLETED."""
@@ -87,8 +100,8 @@ class TestShipdayInterceptOrderStage(FrappeTestCase):
 		mock_log.assert_not_called()
 		self.assertEqual(result, expected)
 
-	def test_partial_delivery_stage_does_not_dispatch(self):
-		"""new_stage=Partial Delivery -> no Wave push, upstream returned."""
+	def test_partial_delivery_not_dispatched_when_not_configured(self):
+		"""Default stages = 'Delivered' only -> Partial Delivery does not push."""
 		expected = _upstream_result("Partial Delivery")
 		with (
 			patch.object(shipday_intercept, "_upstream_order_stage", return_value=expected),
@@ -97,6 +110,48 @@ class TestShipdayInterceptOrderStage(FrappeTestCase):
 			result = shipday_intercept.order_stage(DUMMY_DN)
 		mock_dispatch.assert_not_called()
 		self.assertEqual(result, expected)
+
+	def test_partial_delivery_dispatches_when_configured(self):
+		"""When 'Partial Delivery' is in shipday_completion_stages, it pushes COMPLETED."""
+		expected = _upstream_result("Partial Delivery")
+		with (
+			patch.object(frappe, "get_cached_doc", return_value=_settings("Delivered\nPartial Delivery")),
+			patch.object(shipday_intercept, "_upstream_order_stage", return_value=expected),
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID),
+			patch.object(frappe, "get_doc"),
+			patch.object(order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
+			patch.object(shipday_intercept, "log_step"),
+		):
+			result = shipday_intercept.order_stage(DUMMY_DN)
+		mock_dispatch.assert_called_once()
+		self.assertEqual(mock_dispatch.call_args.kwargs["forced_payload"], {"status": "COMPLETED"})
+		self.assertEqual(result, expected)
+
+	def test_stage_match_is_trimmed_and_case_insensitive(self):
+		"""A stray-cased / padded stage still matches a configured stage."""
+		expected = _upstream_result("  DELIVERED ")
+		with (
+			patch.object(shipday_intercept, "_upstream_order_stage", return_value=expected),
+			patch.object(frappe.db, "get_value", return_value=WAVE_ID),
+			patch.object(frappe, "get_doc"),
+			patch.object(order_status, "dispatch_with_wave_order_ids") as mock_dispatch,
+			patch.object(shipday_intercept, "log_step"),
+		):
+			shipday_intercept.order_stage(DUMMY_DN)
+		mock_dispatch.assert_called_once()
+
+	def test_default_stages_are_delivered_and_partial_delivery(self):
+		"""Empty setting -> default completes both Delivered and Partial Delivery."""
+		self.assertEqual(
+			shipday_intercept._completion_stages(_settings("")),
+			{"delivered", "partialdelivery"},
+		)
+
+	def test_norm_drops_all_whitespace_and_casefolds(self):
+		"""Normalisation removes every space and lowercases, so spacing/casing never blocks a match."""
+		self.assertEqual(shipday_intercept._norm("  pArTiAl   Delivery "), "partialdelivery")
+		self.assertEqual(shipday_intercept._norm("DELIVERED"), "delivered")
+		self.assertEqual(shipday_intercept._norm(None), "")
 
 	def test_delivered_but_so_lacks_wave_order_id_does_not_dispatch(self):
 		"""Non-Wave Sales Order: upstream ran, but no Wave push."""

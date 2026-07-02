@@ -25,12 +25,13 @@
   "wave_app_id",
   "wave_store_id",
   "wave_shop_id",
-  "column_break_outbound",
   "wave_api_key",
   "outbound_stock_sync_enabled",
   "outbound_stock_caps_max_quantity_enabled",
+  "column_break_outbound",
   "outbound_order_status_sync_enabled",
   "wave_non_shipday_completion_mode",
+  "shipday_completion_stages",
   "pick_list_batch_ids_push_enabled",
   "picker_identifier_source",
   "pick_list_erp_submit_lockdown_enabled",
@@ -38,8 +39,8 @@
   "erp_to_wave_push_section",
   "erp_to_wave_push_enabled",
   "wave_common_offline_customer_id",
-  "wave_default_offline_payment_type",
   "column_break_erp_to_wave_push",
+  "wave_default_offline_payment_type",
   "wave_push_failure_todo_enabled",
   "erp_defaults_section",
   "default_company",
@@ -233,6 +234,13 @@
    "options": "Manual only\nOn Payment Entry submit"
   },
   {
+   "default": "Delivered\nPartial Delivery",
+   "description": "Shipday delivery stages that push the Wave order to COMPLETED — one per line, matched case-insensitively with spaces ignored. Default: 'Delivered' and 'Partial Delivery'. Any stage not listed here (e.g. 'Failed') updates ERP normally but never completes the Wave order. Empty falls back to the default.",
+   "fieldname": "shipday_completion_stages",
+   "fieldtype": "Small Text",
+   "label": "Shipday Stages That Complete The Order"
+  },
+  {
    "default": "0",
    "description": "When on, every Pick List creation pushes its items + identifiers (batch numbers, SKU, or barcode — per Picker Identifier Source below) to Wave's picker app. Independent of the ACCEPTED status push, which is gated by Outbound Status Rules. Default off.",
    "fieldname": "pick_list_batch_ids_push_enabled",
@@ -330,6 +338,11 @@
    "fieldtype": "Link",
    "label": "Default Unresolved Items Placeholder",
    "options": "Item"
+  },
+  {
+   "fieldname": "erp_defaults_section",
+   "fieldtype": "Section Break",
+   "label": "ERP Defaults"
   },
   {
    "fieldname": "column_break_erp_defaults",
